@@ -105,7 +105,14 @@ class TestRunConfig:
         assert config.get_thinking_max_tokens() == 8000
 
     def test_valid_thinking_presets(self):
-        for preset in ["none", "disabled", "low", "medium", "high"]:
+        for preset in [
+            "none",
+            "disabled",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+        ]:
             config = RunConfig(thinking=preset)
             assert config.thinking == preset
 

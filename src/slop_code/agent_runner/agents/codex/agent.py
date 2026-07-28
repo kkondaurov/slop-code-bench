@@ -672,7 +672,7 @@ class CodexAgent(Agent):
             # Disabled: omit model_reasoning_effort, set output tokens to 0
             command.extend(["--config", "model_max_output_tokens=0"])
         elif self.thinking:
-            # Preset (low/medium/high): set reasoning effort
+            # Preset (low/medium/high/xhigh): set reasoning effort
             command.extend(
                 [
                     "--config",

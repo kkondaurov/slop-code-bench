@@ -351,6 +351,30 @@ class TestCodexAgent:
         config_idx = command.index("--config")
         assert 'model_reasoning_effort="high"' in command[config_idx + 1]
 
+    def test_build_command_with_xhigh_thinking(
+        self, mock_cost_limits, mock_pricing
+    ):
+        """_build_command passes Codex's extra-high reasoning preset."""
+        agent = CodexAgent(
+            problem_name="test-problem",
+            verbose=False,
+            image="test-image",
+            cost_limits=mock_cost_limits,
+            pricing=mock_pricing,
+            credential=None,
+            binary="codex",
+            model="gpt-5.5",
+            timeout=None,
+            thinking="xhigh",
+            max_thinking_tokens=None,
+            extra_args=[],
+            env={},
+        )
+
+        command = agent._build_command("do something")
+
+        assert 'model_reasoning_effort="xhigh"' in command
+
     def test_build_command_with_extra_args(
         self, mock_cost_limits, mock_pricing
     ):

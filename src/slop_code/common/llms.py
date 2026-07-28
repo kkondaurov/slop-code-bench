@@ -17,7 +17,14 @@ from slop_code.logging import get_logger
 if TYPE_CHECKING:
     from slop_code.agent_runner.credentials import EndpointDefinition
 
-ThinkingPreset = tp.Literal["none", "disabled", "low", "medium", "high"]
+ThinkingPreset = tp.Literal[
+    "none",
+    "disabled",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+]
 
 log = get_logger(__name__)
 
@@ -111,7 +118,7 @@ class ModelDefinition(BaseModel):
             env_overrides: dict[str, str] - Environment variable overrides
 
         codex:
-            reasoning_effort: str - "low" | "medium" | "high"
+            reasoning_effort: str - "low" | "medium" | "high" | "xhigh"
             env_overrides: dict[str, str] - Environment variable overrides
 
         opencode:
