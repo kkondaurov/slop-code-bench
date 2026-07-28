@@ -5,10 +5,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import shutil
 import subprocess
 import tomllib
+from datetime import UTC
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +26,48 @@ EXPECTED_PROMPT_SHA256 = (
 EXPECTED_AST_GREP_VERSION = "0.42.0"
 EXPECTED_AST_GREP_REQUIREMENT = "ast-grep-cli==0.42.0"
 EXPECTED_LOCK_EXCLUDE_NEWER = "2026-03-24T21:59:00Z"
+EXPECTED_PUBLICATION_TAG = "paper-v1-repro.1"
+CONTENT_LOCK_PATH = Path("configs/paper-v1/content-lock.json")
+CONTENT_LOCK_SCHEMA_VERSION = 1
+EXPECTED_CONTENT_TREE_SHA256 = (
+    "9039bb633bb67acbb40ce717fcdad283cb644eeb08defc7494eec7ea2ea185ff"
+)
+CONTENT_LOCK_TREE_ROOTS = ("problems", "src/slop_code")
+CONTENT_LOCK_STATIC_PATHS = (
+    "configs/agents/claude_code.yaml",
+    "configs/agents/codex.yaml",
+    "configs/environments/docker-python3.12-uv.yaml",
+    "configs/models/glm-4.7.yaml",
+    "configs/models/gpt-5.1-codex-max.yaml",
+    "configs/models/gpt-5.2-codex.yaml",
+    "configs/models/gpt-5.2.yaml",
+    "configs/models/gpt-5.3-codex-spark.yaml",
+    "configs/models/gpt-5.3-codex.yaml",
+    "configs/models/gpt-5.4.yaml",
+    "configs/models/opus-4.5.yaml",
+    "configs/models/opus-4.6.yaml",
+    "configs/models/sonnet-4.5.yaml",
+    "configs/models/sonnet-4.6.yaml",
+    "configs/paper-v1/manifest.yaml",
+    "configs/prompts/just-solve.jinja",
+    "configs/providers.yaml",
+    "configs/runs/paper-v1-claude-code.yaml",
+    "configs/runs/paper-v1-codex.yaml",
+    "configs/slop_rules.yaml",
+    "pyproject.toml",
+    "uv.lock",
+)
+CONTENT_LOCK_EPHEMERAL_PARTS = frozenset(
+    {
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+    }
+)
+CONTENT_LOCK_EPHEMERAL_NAMES = frozenset({".DS_Store"})
+CONTENT_LOCK_EPHEMERAL_SUFFIXES = frozenset({".pyc", ".pyo"})
 EXPECTED_PROBLEMS = {
     "circuit_eval": 8,
     "code_search": 5,
@@ -369,11 +414,172 @@ def verify_manifest(manifest: dict[str, Any]) -> list[str]:
         expected_paths,
         "base_configs",
     )
+    _expect(
+        errors,
+        manifest.get("content_lock"),
+        {
+            "path": CONTENT_LOCK_PATH.as_posix(),
+            "algorithm": "sha256",
+            "scope": (
+                "all non-ephemeral files under problems plus the exact "
+                "benchmark harness source, paper-v1 configs, prompt, rules, "
+                "project metadata, and uv lock"
+            ),
+        },
+        "content_lock",
+    )
     return errors
 
 
 def _checkpoint_names(count: int, suffix: str) -> set[str]:
     return {f"checkpoint_{index}{suffix}" for index in range(1, count + 1)}
+
+
+def _is_ephemeral_content_path(path: Path) -> bool:
+    return (
+        bool(CONTENT_LOCK_EPHEMERAL_PARTS.intersection(path.parts))
+        or path.name in CONTENT_LOCK_EPHEMERAL_NAMES
+        or path.suffix in CONTENT_LOCK_EPHEMERAL_SUFFIXES
+    )
+
+
+def paper_v1_content_paths(root: Path) -> list[Path]:
+    """Return the deterministic paper-v1 content-lock path set."""
+    relative_paths = {Path(path) for path in CONTENT_LOCK_STATIC_PATHS}
+    for tree_root in CONTENT_LOCK_TREE_ROOTS:
+        content_root = root / tree_root
+        if not content_root.is_dir():
+            continue
+        for path in content_root.rglob("*"):
+            if path.is_file() or path.is_symlink():
+                relative = path.relative_to(root)
+                if not _is_ephemeral_content_path(relative):
+                    relative_paths.add(relative)
+    return sorted(relative_paths, key=lambda path: path.as_posix())
+
+
+def build_content_lock(root: Path) -> dict[str, Any]:
+    """Hash every behavior-defining paper-v1 input byte-for-byte."""
+    files: dict[str, str] = {}
+    missing: list[str] = []
+    for relative_path in paper_v1_content_paths(root):
+        path = root / relative_path
+        try:
+            if path.is_symlink():
+                content = b"symlink\0" + str(path.readlink()).encode("utf-8")
+            else:
+                content = path.read_bytes()
+            digest = hashlib.sha256(content).hexdigest()
+        except OSError:
+            missing.append(relative_path.as_posix())
+            continue
+        files[relative_path.as_posix()] = digest
+    if missing:
+        raise FileNotFoundError(
+            f"cannot build content lock; missing files: {missing}"
+        )
+
+    tree = hashlib.sha256()
+    for path, digest in files.items():
+        tree.update(path.encode("utf-8"))
+        tree.update(b"\0")
+        tree.update(digest.encode("ascii"))
+        tree.update(b"\n")
+    return {
+        "schema_version": CONTENT_LOCK_SCHEMA_VERSION,
+        "profile": "paper-v1",
+        "algorithm": "sha256",
+        "tree_sha256": tree.hexdigest(),
+        "ephemeral_exclusions": {
+            "directory_names": sorted(CONTENT_LOCK_EPHEMERAL_PARTS),
+            "file_names": sorted(CONTENT_LOCK_EPHEMERAL_NAMES),
+            "suffixes": sorted(CONTENT_LOCK_EPHEMERAL_SUFFIXES),
+        },
+        "files": files,
+    }
+
+
+def write_content_lock(root: Path) -> Path:
+    """Regenerate the checked-in content lock from the current input bytes."""
+    path = root / CONTENT_LOCK_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(build_content_lock(root), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def verify_content_lock(
+    root: Path,
+    *,
+    expected_tree_sha256: str | None = None,
+) -> list[str]:
+    """Require the checked-in path set and every locked byte digest to match."""
+    path = root / CONTENT_LOCK_PATH
+    try:
+        locked = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [f"cannot read paper-v1 content lock {path}: {exc}"]
+    if not isinstance(locked, dict):
+        return [f"expected a JSON object in {path}"]
+
+    errors: list[str] = []
+    _expect(
+        errors,
+        locked.get("schema_version"),
+        CONTENT_LOCK_SCHEMA_VERSION,
+        "content-lock.schema_version",
+    )
+    _expect(errors, locked.get("profile"), "paper-v1", "content-lock.profile")
+    _expect(errors, locked.get("algorithm"), "sha256", "content-lock.algorithm")
+    try:
+        actual = build_content_lock(root)
+    except FileNotFoundError as exc:
+        return [str(exc)]
+
+    locked_files = locked.get("files")
+    if not isinstance(locked_files, dict):
+        errors.append("content-lock.files: expected a mapping")
+        return errors
+    actual_files = actual["files"]
+    if set(locked_files) != set(actual_files):
+        missing = sorted(set(locked_files) - set(actual_files))
+        extra = sorted(set(actual_files) - set(locked_files))
+        errors.append(
+            "content-lock path set mismatch: "
+            f"missing={missing[:20]}, extra={extra[:20]}"
+        )
+    mismatched = sorted(
+        path
+        for path in set(locked_files).intersection(actual_files)
+        if locked_files[path] != actual_files[path]
+    )
+    if mismatched:
+        errors.append(
+            "content-lock byte mismatch: "
+            f"{mismatched[:20]}"
+        )
+    _expect(
+        errors,
+        locked.get("tree_sha256"),
+        actual["tree_sha256"],
+        "content-lock.tree_sha256",
+    )
+    if expected_tree_sha256 is not None:
+        _expect(
+            errors,
+            actual["tree_sha256"],
+            expected_tree_sha256,
+            "paper-v1 expected content tree SHA-256",
+        )
+    _expect(
+        errors,
+        locked.get("ephemeral_exclusions"),
+        actual["ephemeral_exclusions"],
+        "content-lock.ephemeral_exclusions",
+    )
+    return errors
 
 
 def verify_corpus(root: Path) -> list[str]:
@@ -595,6 +801,17 @@ def verify_ast_grep_dependency(root: Path) -> list[str]:
             "pyproject.toml must contain exact dependency "
             f"{EXPECTED_AST_GREP_REQUIREMENT!r}"
         )
+    uv_options = pyproject.get("tool", {}).get("uv", {})
+    if uv_options.get("exclude-newer") != EXPECTED_LOCK_EXCLUDE_NEWER:
+        errors.append(
+            "pyproject.toml artifact cutoff mismatch: expected "
+            f"{EXPECTED_LOCK_EXCLUDE_NEWER}, "
+            f"got {uv_options.get('exclude-newer')!r}"
+        )
+    if "exclude-newer-span" in uv_options:
+        errors.append(
+            "pyproject.toml must not use relative exclude-newer-span"
+        )
 
     try:
         lock = tomllib.loads(lock_path.read_text(encoding="utf-8"))
@@ -617,6 +834,52 @@ def verify_ast_grep_dependency(root: Path) -> list[str]:
             "uv.lock artifact cutoff mismatch: expected "
             f"{EXPECTED_LOCK_EXCLUDE_NEWER}, got {lock_cutoff!r}"
         )
+    if "exclude-newer-span" in lock.get("options", {}):
+        errors.append("uv.lock must not use relative exclude-newer-span")
+
+    cutoff = datetime.fromisoformat(
+        EXPECTED_LOCK_EXCLUDE_NEWER.replace("Z", "+00:00")
+    ).astimezone(UTC)
+    late_artifacts: list[str] = []
+    invalid_upload_times: list[str] = []
+    for package in lock.get("package", []):
+        if not isinstance(package, dict):
+            continue
+        package_name = str(package.get("name", "<unknown>"))
+        artifacts: list[tuple[str, Any]] = [("sdist", package.get("sdist"))]
+        artifacts.extend(
+            (f"wheel[{index}]", wheel)
+            for index, wheel in enumerate(package.get("wheels", []))
+        )
+        for artifact_name, artifact in artifacts:
+            if not isinstance(artifact, dict):
+                continue
+            upload_time = artifact.get("upload-time")
+            if upload_time is None:
+                continue
+            try:
+                uploaded = datetime.fromisoformat(
+                    str(upload_time).replace("Z", "+00:00")
+                ).astimezone(UTC)
+            except ValueError:
+                invalid_upload_times.append(
+                    f"{package_name}.{artifact_name}={upload_time!r}"
+                )
+                continue
+            if uploaded > cutoff:
+                late_artifacts.append(
+                    f"{package_name}.{artifact_name}={upload_time}"
+                )
+    if invalid_upload_times:
+        errors.append(
+            "uv.lock has invalid artifact upload-times: "
+            f"{invalid_upload_times[:10]}"
+        )
+    if late_artifacts:
+        errors.append(
+            "uv.lock has artifacts uploaded after the paper cutoff: "
+            f"{late_artifacts[:10]}"
+        )
     return errors
 
 
@@ -635,6 +898,91 @@ def verify_prompt(root: Path, manifest: dict[str, Any]) -> list[str]:
     except OSError as exc:
         return [f"cannot read prompt {prompt_path}: {exc}"]
     _expect(errors, digest, EXPECTED_PROMPT_SHA256, "just-solve SHA-256")
+    return errors
+
+
+def verify_git_provenance(
+    root: Path,
+    manifest: dict[str, Any],
+    *,
+    publication_ready: bool,
+) -> list[str]:
+    """Require the declared source snapshot in history and optional cleanliness."""
+    source_commit = _nested(manifest, "source", "commit")
+    if not isinstance(source_commit, str):
+        return ["source.commit must be a Git SHA"]
+    git = shutil.which("git")
+    if git is None:
+        return ["cannot verify Git source ancestry: git is not installed"]
+    try:
+        ancestor = subprocess.run(  # noqa: S603
+            [
+                git,
+                "merge-base",
+                "--is-ancestor",
+                source_commit,
+                "HEAD",
+            ],
+            cwd=root,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return [f"cannot verify Git source ancestry: {exc}"]
+    errors: list[str] = []
+    if ancestor.returncode != 0:
+        errors.append(
+            "declared paper source commit is not an ancestor of HEAD: "
+            f"{source_commit}"
+        )
+
+    if publication_ready:
+        try:
+            status = subprocess.run(  # noqa: S603
+                [
+                    git,
+                    "status",
+                    "--porcelain=v1",
+                    "--untracked-files=all",
+                ],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            errors.append(f"cannot verify publication worktree state: {exc}")
+        else:
+            if status.returncode != 0:
+                errors.append("cannot read publication worktree state")
+            elif status.stdout:
+                errors.append(
+                    "publication-ready verification requires a clean worktree"
+                )
+        try:
+            tags = subprocess.run(  # noqa: S603
+                [git, "tag", "--points-at", "HEAD"],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            errors.append(f"cannot verify publication release tag: {exc}")
+        else:
+            head_tags = set(tags.stdout.splitlines())
+            if (
+                tags.returncode != 0
+                or EXPECTED_PUBLICATION_TAG not in head_tags
+            ):
+                errors.append(
+                    "publication-ready verification requires HEAD at tag "
+                    f"{EXPECTED_PUBLICATION_TAG}"
+                )
     return errors
 
 
@@ -781,7 +1129,10 @@ def verify_base_configs(
 
 
 def verify_repository(
-    root: Path, *, check_tools: bool = True
+    root: Path,
+    *,
+    check_tools: bool = True,
+    publication_ready: bool = False,
 ) -> list[str]:
     """Return all paper-v1 packaging errors found under ``root``."""
     errors: list[str] = []
@@ -791,6 +1142,19 @@ def verify_repository(
         return errors
 
     errors.extend(verify_manifest(manifest))
+    errors.extend(
+        verify_git_provenance(
+            root,
+            manifest,
+            publication_ready=publication_ready,
+        )
+    )
+    errors.extend(
+        verify_content_lock(
+            root,
+            expected_tree_sha256=EXPECTED_CONTENT_TREE_SHA256,
+        )
+    )
     errors.extend(verify_corpus(root))
     errors.extend(verify_rules(root, manifest))
     errors.extend(verify_ast_grep_dependency(root))
@@ -811,9 +1175,25 @@ def main() -> int:
         default=Path(__file__).resolve().parents[1],
         help="Repository root (defaults to the script's parent repository)",
     )
+    parser.add_argument(
+        "--publication-ready",
+        action="store_true",
+        help="Also require a clean Git worktree suitable for a published run",
+    )
+    parser.add_argument(
+        "--write-content-lock",
+        action="store_true",
+        help="Regenerate configs/paper-v1/content-lock.json before checking",
+    )
     args = parser.parse_args()
     root = args.root.resolve()
-    errors = verify_repository(root)
+    if args.write_content_lock:
+        path = write_content_lock(root)
+        print(f"wrote {path}")
+    errors = verify_repository(
+        root,
+        publication_ready=args.publication_ready,
+    )
     if errors:
         print(f"paper-v1 verification failed ({len(errors)} errors):")
         for error in errors:

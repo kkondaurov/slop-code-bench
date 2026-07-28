@@ -1,6 +1,7 @@
 """Tests for run_agent command helper functions."""
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
@@ -21,6 +22,7 @@ from slop_code.entrypoints.commands.run_agent import _resolve_output_directory
 from slop_code.entrypoints.commands.run_agent import _resolve_problem_names
 from slop_code.entrypoints.commands.run_agent import _validate_problem_paths
 from slop_code.entrypoints.commands.run_agent import _validate_resume_config
+from slop_code.entrypoints.commands.run_agent import run_agent
 
 
 class TestGetNested:
@@ -684,3 +686,138 @@ class TestValidateProblemPaths:
         """Test validation passes with empty list."""
         # Should not raise
         _validate_problem_paths([], tmp_path)
+
+
+class TestRunAgentProvenanceLifecycle:
+    """Exercise provenance through the command's actual control flow."""
+
+    @staticmethod
+    def _invoke(tmp_path: Path, *, task_config_error: bool) -> tuple:
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        problem_path = tmp_path / "problems"
+        problem_path.mkdir()
+        ctx = SimpleNamespace(
+            obj=SimpleNamespace(
+                debug=False,
+                verbosity=0,
+                problem_path=problem_path,
+                overwrite=False,
+                seed=42,
+            )
+        )
+        run_cfg = MagicMock()
+        run_cfg.output_path = str(run_dir)
+        run_cfg.model.provider = "codex_auth"
+        run_cfg.model.name = "gpt-5.4"
+        run_cfg.problems = ["dag_execution"]
+        run_cfg.agent_config_path = None
+        run_cfg.environment_config_path = None
+        run_cfg.prompt_path = tmp_path / "prompt.jinja"
+        run_cfg.prompt_content = "solve"
+        run_cfg.thinking = "high"
+        run_cfg.pass_policy.value = "any-case"
+        run_cfg.one_shot.enabled = False
+        run_cfg.save_dir = "outputs/paper-v1"
+
+        env_spec = MagicMock()
+        env_spec.name = "python3.12"
+        agent_config = MagicMock()
+        agent_config.type = "codex"
+        agent_config.version = "0.110.0"
+        result = SimpleNamespace(success=True)
+        task_effect = RuntimeError("task config failed") if task_config_error else None
+
+        with (
+            patch(
+                "slop_code.entrypoints.commands.run_agent._load_and_validate_run_config",
+                return_value=run_cfg,
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent._resolve_output_directory",
+                return_value=(run_dir, False),
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent._resolve_environment_and_credentials",
+                return_value=(env_spec, MagicMock(), MagicMock()),
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent._build_agent_config",
+                return_value=agent_config,
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent._validate_problem_paths"
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent.common.setup_command_logging"
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent._prepare_run_artifacts",
+                return_value="test:image",
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent.start_run_provenance"
+            ) as start,
+            patch(
+                "slop_code.entrypoints.commands.run_agent.finalize_run_provenance"
+            ) as finalize,
+            patch(
+                "slop_code.entrypoints.commands.run_agent._create_task_config",
+                side_effect=task_effect,
+                return_value=MagicMock(),
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent.problem_runner.run_problems",
+                return_value=[result],
+            ),
+            patch("slop_code.entrypoints.commands.run_agent._report_results"),
+            patch(
+                "slop_code.entrypoints.commands.run_agent._create_checkpoint_results_and_summary"
+            ),
+        ):
+            def invocation() -> None:
+                run_agent(
+                    ctx=ctx,
+                    config=None,
+                    agent_config_path=None,
+                    environment_config_path=None,
+                    prompt_template_path=None,
+                    model_override=None,
+                    provider_api_key_env=None,
+                    problem_names=[],
+                    num_workers=1,
+                    evaluate=True,
+                    live_progress=False,
+                    resume=None,
+                    dry_run=False,
+                    overrides=None,
+                )
+
+            if task_config_error:
+                with pytest.raises(RuntimeError, match="task config failed"):
+                    invocation()
+            else:
+                invocation()
+        return start, finalize
+
+    def test_success_finalizes_completed(self, tmp_path: Path) -> None:
+        start, finalize = self._invoke(tmp_path, task_config_error=False)
+
+        start.assert_called_once()
+        assert start.call_args.kwargs["executed_problem_names"] == [
+            "dag_execution"
+        ]
+        finalize.assert_called_once_with(
+            tmp_path / "run",
+            status="completed",
+        )
+
+    def test_task_config_failure_finalizes_failed(self, tmp_path: Path) -> None:
+        start, finalize = self._invoke(tmp_path, task_config_error=True)
+
+        start.assert_called_once()
+        finalize.assert_called_once_with(
+            tmp_path / "run",
+            status="failed",
+            error_type="RuntimeError",
+        )

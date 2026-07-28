@@ -34,6 +34,8 @@ from slop_code.evaluation import ProblemConfig
 from slop_code.execution import EnvironmentSpecType
 from slop_code.execution import docker_runtime
 from slop_code.logging import get_logger
+from slop_code.provenance import finalize_run_provenance
+from slop_code.provenance import start_run_provenance
 
 logger = get_logger(__name__)
 
@@ -1355,51 +1357,95 @@ def run_agent(
     image_name = _prepare_run_artifacts(
         run_dir, env_spec, agent_config, run_cfg
     )
-    run_logger.info(
-        "Starting agent runs",
-        num_problems=len(problem_names_resolved),
-        num_workers=num_workers,
+    normalized_save_dir = run_cfg.save_dir.replace("\\", "/").rstrip("/")
+    profile = (
+        "paper-v1"
+        if normalized_save_dir.endswith("outputs/paper-v1")
+        else None
     )
-
-    # 13. Create task config
-    task_config = _create_task_config(
-        problem_base_path=ctx.obj.problem_path,
+    base_image_name = (
+        env_spec.get_base_image()
+        if isinstance(env_spec, docker_runtime.DockerEnvironmentSpec)
+        else ""
+    )
+    start_run_provenance(
+        repository_root=ctx.obj.problem_path.resolve().parent,
         run_dir=run_dir,
-        env_spec=env_spec,
-        agent_config=agent_config,
-        model_def=model_def,
-        credential=credential,
-        run_cfg=run_cfg,
+        profile=profile,
+        model_provider=run_cfg.model.provider,
+        model_name=run_cfg.model.name,
+        agent_type=agent_config.type,
+        agent_version=agent_config.version,
+        thinking=run_cfg.thinking,
         seed=ctx.obj.seed,
-        verbosity=ctx.obj.verbosity,
-        debug=ctx.obj.debug,
-        evaluate=evaluate,
-        live_progress=live_progress,
-        image_name=image_name,
-        resume=is_resuming,
-    )
-
-    # 14. Run problems
-    results = problem_runner.run_problems(
-        problem_names=problem_names_resolved,
-        config=task_config,
+        problem_names=full_problem_list,
+        executed_problem_names=problem_names_resolved,
         num_workers=num_workers,
-        console=console,
+        evaluate=evaluate,
+        environment_name=env_spec.name,
+        base_image_name=base_image_name,
+        agent_image_name=image_name,
     )
+    try:
+        run_logger.info(
+            "Starting agent runs",
+            num_problems=len(problem_names_resolved),
+            num_workers=num_workers,
+        )
 
-    # 15. Report results
-    _report_results(results)
-
-    # 16. Create summary if evaluating
-    if evaluate:
-        _create_checkpoint_results_and_summary(
+        # 13. Create task config
+        task_config = _create_task_config(
+            problem_base_path=ctx.obj.problem_path,
             run_dir=run_dir,
-            problems_base_path=ctx.obj.problem_path,
+            env_spec=env_spec,
+            agent_config=agent_config,
+            model_def=model_def,
+            credential=credential,
+            run_cfg=run_cfg,
+            seed=ctx.obj.seed,
+            verbosity=ctx.obj.verbosity,
+            debug=ctx.obj.debug,
+            evaluate=evaluate,
+            live_progress=live_progress,
+            image_name=image_name,
+            resume=is_resuming,
+        )
+
+        # 14. Run problems
+        results = problem_runner.run_problems(
             problem_names=problem_names_resolved,
+            config=task_config,
+            num_workers=num_workers,
             console=console,
         )
-    else:
-        run_logger.info(
-            "Evaluation disabled; skipping checkpoint result generation",
-            run_directory=str(run_dir),
+
+        # 15. Report results
+        _report_results(results)
+
+        # 16. Create summary if evaluating
+        if evaluate:
+            _create_checkpoint_results_and_summary(
+                run_dir=run_dir,
+                problems_base_path=ctx.obj.problem_path,
+                problem_names=problem_names_resolved,
+                console=console,
+            )
+        else:
+            run_logger.info(
+                "Evaluation disabled; skipping checkpoint result generation",
+                run_directory=str(run_dir),
+            )
+    except BaseException as exc:
+        finalize_run_provenance(
+            run_dir,
+            status="failed",
+            error_type=type(exc).__name__,
         )
+        raise
+
+    final_status = (
+        "completed"
+        if all(result.success for result in results)
+        else "completed_with_problem_errors"
+    )
+    finalize_run_provenance(run_dir, status=final_status)

@@ -186,3 +186,10 @@ model_cli_matrix:
 base_configs:
   codex: configs/runs/paper-v1-codex.yaml
   claude_code: configs/runs/paper-v1-claude-code.yaml
+
+content_lock:
+  path: configs/paper-v1/content-lock.json
+  algorithm: sha256
+  scope: >-
+    all non-ephemeral files under problems plus the exact benchmark harness
+    source, paper-v1 configs, prompt, rules, project metadata, and uv lock

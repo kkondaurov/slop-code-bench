@@ -62,6 +62,31 @@ can repair its declared environment. Hidden tests are materialized only after
 the agent session is gone. Thus an agent inherits its code, but not its
 container or conversation.
 
+## Locked benchmark inputs
+
+[`configs/paper-v1/content-lock.json`](../configs/paper-v1/content-lock.json)
+is the byte-level identity of this profile. It records a SHA-256 for every
+non-ephemeral file under `problems/` (including hidden tests, test data,
+solutions, and static assets), plus the exact paper presets, model/provider/
+agent/environment configs, prompt, AST-grep rules, `pyproject.toml`, `uv.lock`,
+and the complete `src/slop_code/` harness implementation. The verifier compares
+both the complete path set and every file's bytes. Only named caches, virtual
+environments, bytecode, and `.DS_Store` are excluded.
+
+The selected upstream source commit must be an ancestor of the checked-out
+fork commit. The dependency verifier also rejects relative
+`exclude-newer-span` settings and any locked artifact whose recorded upload
+time is later than the absolute paper-era cutoff.
+
+Regenerate the content lock only after an intentional benchmark-input change,
+then review the resulting diff and update the verifier's
+`EXPECTED_CONTENT_TREE_SHA256` before committing:
+
+```bash
+UV_NO_CONFIG=1 uv run --frozen python scripts/verify_paper_v1.py \
+  --write-content-lock
+```
+
 ## Run and evaluate
 
 Docker must be running. Credentials remain entirely user-supplied through the
@@ -95,12 +120,46 @@ uv run --frozen slop-code run --config configs/runs/paper-v1-codex.yaml
 uv run --frozen slop-code run --config configs/runs/paper-v1-claude-code.yaml
 ```
 
+Credential source and model identity are separate. To use an existing Codex
+subscription login from `~/.codex/auth.json`, keep the GPT 5.4 model and change
+only the credential provider:
+
+```bash
+uv run --frozen slop-code run \
+  --config configs/runs/paper-v1-codex.yaml \
+  model.provider=codex_auth
+```
+
+Claude Code's login state on the macOS host is not mounted wholesale into the
+fresh benchmark containers. Subscription use requires an exported
+`CLAUDE_CODE_OAUTH_TOKEN`; with that present, use
+`model.provider=claude_code_oauth`. The default `anthropic` provider instead
+reads `ANTHROPIC_API_KEY`.
+
 Both explicitly select all 20 problems, `just-solve`, high reasoning, a
 7,200-second checkpoint timeout, and zero turn/cost caps. Outputs go below
 `outputs/paper-v1/`. `pass_policy: any-case` is intentional: it records
 whether any case passed while the runner's explicit exemption keeps failed
 checkpoints from truncating the iterative trajectory. Strict, isolated, and
 core correctness are still calculated from the detailed test results.
+
+Every actual run automatically writes `provenance.json` at its output root.
+It records the sanitized invocation; model, credential-provider name, harness
+and version; seed and problem list; fork/upstream commits; clean or dirty Git
+state (with only a diff hash); input/config/lock hashes; host and Docker image
+metadata; tool versions when available; invocation status; and SHA-256 hashes
+for stable run artifacts. Credential values are never recorded. Live `.log`
+files, symlinks, and `provenance.json` itself are excluded from artifact hashes.
+Resuming appends a new invocation with its own complete Git/input/host/image
+context, executed-problem list, and final artifact snapshot, so later work can
+never rewrite the identity of earlier output in the same run directory.
+
+Codex token telemetry uses the CLI's final cumulative usage record. Its
+inclusive input is split into uncached input plus cached input; output remains
+inclusive of reasoning, so neither cache nor reasoning is priced twice. Raw
+rollout reasoning is accepted only when its thread ID and cumulative totals
+exactly match stdout; missing, ambiguous, or mismatched raw telemetry warns and
+records zero reasoning instead of inventing a value.
 
 `run` evaluates checkpoints by default. To separate inference and evaluation:
 
@@ -141,3 +200,27 @@ uv run --frozen slop-code run \
 The paper did not release its raw trajectories, complete run manifest, or
 provider-side snapshots. These presets reproduce the published local
 protocol and version matrix; hosted model behavior can still drift.
+
+## Publication-ready workflow
+
+For an experiment you intend to cite, start from the public release tag and a
+clean worktree:
+
+```bash
+git clone https://github.com/kkondaurov/slop-code-bench.git
+cd slop-code-bench
+git fetch --tags
+git switch --detach paper-v1-repro.1
+git status --short
+UV_NO_CONFIG=1 uv sync --frozen
+UV_NO_CONFIG=1 uv run --frozen python scripts/verify_paper_v1.py \
+  --publication-ready
+```
+
+`git status --short` must print nothing. Publication mode also requires HEAD to
+be exactly at `paper-v1-repro.1`; the verifier must pass before the run. Then
+invoke one of the exact commands above. Preserve and publish the complete run
+directory together with the command you used and the tag. The run's
+`provenance.json` binds the results to the suite inputs, resolved configuration,
+Git state, Docker images, and stable artifact bytes; the tag makes the harness
+implementation independently retrievable.
