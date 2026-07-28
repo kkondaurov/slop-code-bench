@@ -75,6 +75,15 @@ class CodexAgent(Agent):
     PROMPT_FILENAME = "prompt.txt"
     STDOUT_FILENAME = "stdout.jsonl"
     STDERR_FILENAME = "stderr.log"
+    TELEMETRY_SEMANTICS_VERSION = 1
+    TELEMETRY_SEMANTICS: tp.ClassVar[dict[str, str]] = {
+        "input_tokens": "uncached input tokens",
+        "cached_input_tokens": (
+            "cached subset of Codex's inclusive raw input tokens"
+        ),
+        "output_tokens": "output tokens inclusive of reasoning",
+        "reasoning_output_tokens": "reasoning subset of output tokens",
+    }
 
     def __init__(
         self,
@@ -190,18 +199,36 @@ class CodexAgent(Agent):
             payload = json.loads(line)
         except json.JSONDecodeError:
             return None, None, None
+        if not isinstance(payload, dict):
+            return None, None, None
 
         # Only turn.completed has usage data
         if payload.get("type") != "turn.completed":
             return None, None, payload
 
         usage = payload.get("usage") or {}
-        input_tokens = usage.get("input_tokens", 0)
-        output_tokens = usage.get("output_tokens", 0)
-        cached_tokens = usage.get("cached_input_tokens", 0)
+        if not isinstance(usage, dict):
+            log.warning(
+                "agent.codex.telemetry.stdout_usage_invalid",
+                usage_type=type(usage).__name__,
+            )
+            usage = {}
+
+        def token_count(key: str) -> int:
+            value = usage.get(key, 0)
+            if isinstance(value, bool):
+                return 0
+            try:
+                return max(int(value), 0)
+            except (TypeError, ValueError):
+                return 0
+
+        inclusive_input_tokens = token_count("input_tokens")
+        output_tokens = token_count("output_tokens")
+        cached_tokens = token_count("cached_input_tokens")
 
         tokens = TokenUsage(
-            input=input_tokens,
+            input=max(inclusive_input_tokens - cached_tokens, 0),
             output=output_tokens,
             cache_read=cached_tokens,
             cache_write=0,
@@ -319,10 +346,11 @@ class CodexAgent(Agent):
         # Use partial to bind pricing to parse_line
         parser = functools.partial(self.parse_line, pricing=self.pricing)
 
-        total_cost = 0.0
-        total_tokens = TokenUsage()
+        cumulative_tokens: TokenUsage | None = None
         step_count = 0
         runtime_result = None
+        thread_id: str | None = None
+        conflicting_thread_ids = False
 
         for item in stream_cli_command(
             runtime=self.runtime,
@@ -336,22 +364,41 @@ class CodexAgent(Agent):
                 runtime_result = item
                 break
 
-            cost, tokens, payload = item
+            _cost, tokens, payload = item
             self.log.debug("Received item", item=item, verbose=True)
-            if cost is not None:
-                total_cost += cost
             if tokens is not None:
-                total_tokens = total_tokens + tokens
+                # Codex emits cumulative usage. Keep the latest record rather
+                # than summing repeated cumulative snapshots.
+                cumulative_tokens = tokens
 
             # Count steps from turn.started and item.completed events
             if payload is not None:
                 event_type = payload.get("type")
+                if event_type == "thread.started":
+                    candidate = payload.get("thread_id")
+                    if isinstance(candidate, str) and candidate:
+                        if thread_id is None and not conflicting_thread_ids:
+                            thread_id = candidate
+                        elif candidate != thread_id:
+                            conflicting_thread_ids = True
+                            thread_id = None
                 if event_type in ("turn.started", "item.completed"):
                     step_count += 1
                     self.usage.steps += 1
 
         stdout = runtime_result.stdout if runtime_result else ""
         stderr = runtime_result.stderr if runtime_result else ""
+        reasoning_tokens = 0
+        if conflicting_thread_ids:
+            self._warn_reasoning_fallback("conflicting stdout thread ids")
+        else:
+            reasoning_tokens = self._reconcile_reasoning_tokens(
+                thread_id=thread_id,
+                stdout_tokens=cumulative_tokens,
+            )
+        total_tokens = (cumulative_tokens or TokenUsage()).model_copy(
+            update={"reasoning": reasoning_tokens}
+        )
 
         return AgentCommandResult(
             result=runtime_result,
@@ -360,22 +407,217 @@ class CodexAgent(Agent):
                 "input_tokens": total_tokens.input,
                 "output_tokens": total_tokens.output,
                 "cached_input_tokens": total_tokens.cache_read,
-                "total_tokens": total_tokens.input + total_tokens.output,
+                "reasoning_output_tokens": total_tokens.reasoning,
+                "total_tokens": (
+                    total_tokens.input
+                    + total_tokens.cache_read
+                    + total_tokens.output
+                ),
                 "steps": step_count,
+                "telemetry_semantics_version": (
+                    self.TELEMETRY_SEMANTICS_VERSION
+                ),
             },
             stdout=stdout,
             stderr=stderr,
         )
+
+    def _warn_reasoning_fallback(
+        self,
+        reason: str,
+        **details: object,
+    ) -> int:
+        self.log.warning(
+            "agent.codex.telemetry.reasoning_fallback",
+            reason=reason,
+            **details,
+        )
+        return 0
+
+    @staticmethod
+    def _read_rollout_token_record(
+        path: Path,
+    ) -> tuple[str | None, object | None, str | None]:
+        """Read a rollout's session id and final non-null token record."""
+        session_id: str | None = None
+        final_info: object | None = None
+        malformed: str | None = None
+
+        try:
+            with path.open(encoding="utf-8") as handle:
+                for line_number, line in enumerate(handle, 1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        malformed = f"invalid JSON at line {line_number}"
+                        continue
+                    if not isinstance(event, dict):
+                        malformed = f"non-object JSON at line {line_number}"
+                        continue
+
+                    payload = event.get("payload")
+                    if not isinstance(payload, dict):
+                        continue
+                    if event.get("type") == "session_meta":
+                        candidate = payload.get("id")
+                        if isinstance(candidate, str) and candidate:
+                            if session_id is not None and candidate != session_id:
+                                malformed = "conflicting session ids"
+                            session_id = candidate
+                        continue
+                    if (
+                        event.get("type") == "event_msg"
+                        and payload.get("type") == "token_count"
+                        and payload.get("info") is not None
+                    ):
+                        # These records are cumulative and can be duplicated.
+                        # Assignment deliberately keeps only the final one.
+                        final_info = payload.get("info")
+        except (OSError, UnicodeError) as exc:
+            return None, None, f"cannot read rollout: {type(exc).__name__}"
+
+        return session_id, final_info, malformed
+
+    @staticmethod
+    def _strict_token_count(value: object) -> int | None:
+        if type(value) is not int or value < 0:
+            return None
+        return value
+
+    def _reconcile_reasoning_tokens(
+        self,
+        thread_id: str | None,
+        stdout_tokens: TokenUsage | None,
+    ) -> int:
+        """Reconcile reasoning from the raw rollout without risking a run."""
+        try:
+            if not thread_id:
+                return self._warn_reasoning_fallback(
+                    "missing stdout thread id"
+                )
+            if stdout_tokens is None:
+                return self._warn_reasoning_fallback(
+                    "missing stdout usage",
+                    thread_id=thread_id,
+                )
+            if self._trace_dir is None:
+                return self._warn_reasoning_fallback(
+                    "raw rollout directory unavailable",
+                    thread_id=thread_id,
+                )
+
+            candidates: list[tuple[Path, object | None, str | None]] = []
+            for path in find_jsonl_files(self._trace_dir):
+                session_id, final_info, malformed = (
+                    self._read_rollout_token_record(path)
+                )
+                if session_id == thread_id:
+                    candidates.append((path, final_info, malformed))
+
+            if len(candidates) != 1:
+                return self._warn_reasoning_fallback(
+                    "raw rollout match count is not one",
+                    thread_id=thread_id,
+                    matches=len(candidates),
+                )
+
+            path, final_info, malformed = candidates[0]
+            if malformed is not None:
+                return self._warn_reasoning_fallback(
+                    "malformed raw rollout",
+                    thread_id=thread_id,
+                    rollout=path.name,
+                    detail=malformed,
+                )
+            if not isinstance(final_info, dict):
+                return self._warn_reasoning_fallback(
+                    "missing final non-null token count",
+                    thread_id=thread_id,
+                    rollout=path.name,
+                )
+
+            raw_usage = final_info.get("total_token_usage")
+            if not isinstance(raw_usage, dict):
+                return self._warn_reasoning_fallback(
+                    "malformed cumulative token count",
+                    thread_id=thread_id,
+                    rollout=path.name,
+                )
+
+            actual = {
+                key: self._strict_token_count(raw_usage.get(key))
+                for key in (
+                    "input_tokens",
+                    "cached_input_tokens",
+                    "output_tokens",
+                    "reasoning_output_tokens",
+                )
+            }
+            if any(value is None for value in actual.values()):
+                return self._warn_reasoning_fallback(
+                    "malformed cumulative token values",
+                    thread_id=thread_id,
+                    rollout=path.name,
+                )
+
+            expected = {
+                "input_tokens": (
+                    stdout_tokens.input + stdout_tokens.cache_read
+                ),
+                "cached_input_tokens": stdout_tokens.cache_read,
+                "output_tokens": stdout_tokens.output,
+            }
+            comparable_actual = {
+                key: actual[key]
+                for key in (
+                    "input_tokens",
+                    "cached_input_tokens",
+                    "output_tokens",
+                )
+            }
+            if comparable_actual != expected:
+                return self._warn_reasoning_fallback(
+                    "raw rollout usage does not match stdout",
+                    thread_id=thread_id,
+                    rollout=path.name,
+                    expected=expected,
+                    actual=comparable_actual,
+                )
+
+            reasoning_tokens = tp.cast(
+                "int",
+                actual["reasoning_output_tokens"],
+            )
+            if reasoning_tokens > stdout_tokens.output:
+                return self._warn_reasoning_fallback(
+                    "reasoning exceeds inclusive output",
+                    thread_id=thread_id,
+                    rollout=path.name,
+                    reasoning=reasoning_tokens,
+                    output=stdout_tokens.output,
+                )
+            return reasoning_tokens
+        except Exception as exc:  # noqa: BLE001
+            return self._warn_reasoning_fallback(
+                "unexpected raw rollout telemetry error",
+                thread_id=thread_id,
+                error_type=type(exc).__name__,
+            )
 
     def _sync_usage(self, totals: dict[str, int]) -> None:
         totals = totals or {}
         input_tokens = int(totals.get("input_tokens") or 0)
         output_tokens = int(totals.get("output_tokens") or 0)
         cache_read_tokens = int(totals.get("cached_input_tokens") or 0)
+        reasoning_tokens = int(totals.get("reasoning_output_tokens") or 0)
         tokens = TokenUsage(
             input=input_tokens,
             output=output_tokens,
             cache_read=cache_read_tokens,
+            reasoning=reasoning_tokens,
         )
         cost = self.pricing.get_cost(tokens) if self.pricing else 0.0
         # Update tokens and cost without incrementing steps (already done during streaming)
