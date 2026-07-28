@@ -167,6 +167,12 @@ def process_stream(
 
         yield from handle_event(kind, payload)
 
+    # A short-lived process can exit before the pump thread has enqueued its
+    # final stdout/stderr chunks. Wait for that thread once the process is
+    # known to be done, then drain the queue below.
+    if exit_code is not None:
+        thread.join()
+
     # Handle any remaining events in the queue
     while True:
         try:

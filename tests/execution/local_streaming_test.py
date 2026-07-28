@@ -330,6 +330,30 @@ class TestLocalStreamingRuntimeStream:
         finally:
             runtime.cleanup()
 
+    def test_stream_captures_repeated_short_lived_processes(
+        self, local_spec: LocalEnvironmentSpec, tmp_path: Path
+    ) -> None:
+        """Fast process exit does not race with the output pump."""
+        runtime = LocalStreamingRuntime.spawn(
+            environment=local_spec,
+            working_dir=tmp_path,
+        )
+        try:
+            for index in range(20):
+                expected = f"quick-{index}"
+                events = list(
+                    runtime.stream(
+                        f"echo {expected}",
+                        env={},
+                        timeout=10,
+                    )
+                )
+                result = events[-1].result
+                assert result is not None
+                assert expected in result.stdout
+        finally:
+            runtime.cleanup()
+
 
 class TestLocalStreamingRuntimePoll:
     """Tests for LocalStreamingRuntime.poll()."""
