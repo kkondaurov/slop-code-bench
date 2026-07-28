@@ -5,7 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV HOME=/tmp/agent_home
 
 RUN apt-get update && apt-get upgrade -y && apt-get install -y build-essential
-RUN apt-get install -y bzip2 tar gzip zip unzip curl ca-certificates gnupg procps
+RUN apt-get install -y bzip2 tar gzip zip unzip curl ca-certificates gnupg procps git ripgrep
 
 # Install Node via nvm and make it the default
 ENV NVM_DIR=/usr/local/nvm
