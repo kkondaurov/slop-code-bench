@@ -234,8 +234,13 @@ class TestCodexAgent:
 
         agent.cleanup()
 
-        # After cleanup, session is None
+        # Fresh checkpoint setup must not retain runtime or environment state.
         assert agent._session is None
+        assert agent._environment is None
+        assert agent._runtime is None
+        assert agent._trace_tmp is None
+        assert agent._trace_dir is None
+        assert runtime.cleaned is True
 
     def test_reset_clears_state(self, tmp_path, mock_cost_limits, mock_pricing):
         """reset() clears internal state."""

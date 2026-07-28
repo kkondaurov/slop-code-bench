@@ -87,7 +87,7 @@ def get_class_node(code: str):
 def get_radon_complexity(file_path) -> dict[str, int]:
     """Run radon cc on a file and return a dict of name -> complexity."""
     result = subprocess.run(
-        ["uv", "run", "radon", "cc", "-s", str(file_path)],
+        ["uv", "run", "--frozen", "radon", "cc", "-s", str(file_path)],
         capture_output=True,
         text=True,
         check=True,

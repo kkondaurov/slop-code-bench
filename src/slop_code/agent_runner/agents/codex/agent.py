@@ -29,6 +29,7 @@ from slop_code.common.llms import APIPricing
 from slop_code.common.llms import ModelDefinition
 from slop_code.common.llms import ThinkingPreset
 from slop_code.common.llms import TokenUsage
+from slop_code.common.temp import temporary_directory
 from slop_code.execution import DockerEnvironmentSpec
 from slop_code.execution import EnvironmentSpec
 from slop_code.execution import Session
@@ -236,7 +237,7 @@ class CodexAgent(Agent):
         self._environment = session.spec
         mounts: dict[str, dict[str, str]] = {}
         if isinstance(session.spec, DockerEnvironmentSpec):
-            self._trace_tmp = tempfile.TemporaryDirectory()
+            self._trace_tmp = temporary_directory()
             self._trace_dir = Path(self._trace_tmp.name)
             self._trace_dir.mkdir(parents=True, exist_ok=True)
             self._trace_dir.chmod(0o777)
@@ -496,11 +497,15 @@ class CodexAgent(Agent):
 
     def cleanup(self) -> None:
         """Clean up resources held by the Codex agent."""
+        if self._runtime is not None:
+            self._runtime.cleanup()
+            self._runtime = None
         self._session = None
+        self._environment = None
         if self._trace_tmp is not None:
             self._trace_tmp.cleanup()
             self._trace_tmp = None
-            self._trace_dir = None
+        self._trace_dir = None
         self.log.debug("agent.codex.cleanup")
 
 

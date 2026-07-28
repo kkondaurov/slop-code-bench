@@ -25,6 +25,7 @@ from slop_code.common.llms import APIPricing
 from slop_code.common.llms import ModelDefinition
 from slop_code.common.llms import ThinkingPreset
 from slop_code.common.llms import TokenUsage
+from slop_code.common.temp import temporary_directory
 from slop_code.execution import Session
 from slop_code.execution import StreamingRuntime
 
@@ -249,7 +250,7 @@ class OpenCodeAgent(Agent):
         return volumes
 
     def setup(self, session: Session) -> None:
-        self._tmp_dir = tempfile.TemporaryDirectory()
+        self._tmp_dir = temporary_directory()
 
         self._session = session
 
@@ -433,9 +434,14 @@ class OpenCodeAgent(Agent):
         self.log.debug("Cleaning up agent")
         if self._runtime is not None:
             self._runtime.cleanup()
+            self._runtime = None
 
         if self._tmp_dir is not None:
             self._tmp_dir.cleanup()
+            self._tmp_dir = None
+
+        self._session = None
+        self._storage_dir = None
 
     def _enforce_limits(self) -> bool:
         if not self.cost_limits.is_above_limits(

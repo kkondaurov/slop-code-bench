@@ -4,11 +4,18 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def _load_module():
     module_path = (
         Path(__file__).parent.parent / "scripts" / "abstraction_roi.py"
     )
+    if not module_path.exists():
+        pytest.skip(
+            "paper-v1 source snapshot omits scripts/abstraction_roi.py",
+            allow_module_level=True,
+        )
     spec = importlib.util.spec_from_file_location(
         "abstraction_roi", module_path
     )

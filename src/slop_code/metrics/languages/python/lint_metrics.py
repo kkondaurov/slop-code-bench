@@ -19,6 +19,7 @@ def calculate_lint_metrics(source: Path) -> LintMetrics:
     cmd = [
         "uv",
         "run",
+        "--frozen",
         "ruff",
         "check",
         "--statistics",

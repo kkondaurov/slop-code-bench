@@ -9,6 +9,11 @@ import pytest
 MODULE_PATH = (
     Path(__file__).resolve().parents[2] / "scratch" / "flagged_dup_loc.py"
 )
+if not MODULE_PATH.exists():
+    pytest.skip(
+        "paper-v1 source snapshot omits scratch/flagged_dup_loc.py",
+        allow_module_level=True,
+    )
 SPEC = importlib.util.spec_from_file_location(
     "flagged_dup_loc_module", MODULE_PATH
 )

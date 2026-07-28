@@ -15,6 +15,12 @@ from slop_code.execution.models import CommandConfig
 from slop_code.execution.models import SetupConfig
 
 
+@pytest.fixture
+def tmp_path(docker_shared_tmp_path: Path) -> Path:
+    """Use a Colima-visible path for Docker bind-mount tests."""
+    return docker_shared_tmp_path
+
+
 def _docker_available() -> bool:
     """Check if Docker is available on the system."""
     if not shutil.which("docker"):

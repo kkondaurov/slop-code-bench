@@ -12,6 +12,14 @@
 ![](assets/overview.png)
 ---
 
+> [!IMPORTANT]
+> This fork adds a documented reproduction of the protocol reported in
+> [SlopCodeBench paper v1](https://arxiv.org/abs/2603.24755v1), based on the
+> last public upstream commit before submission. It is not an official paper
+> artifact from the benchmark authors. See
+> [the paper-v1 reproduction guide](docs/PAPER_V1.md) for the source pin,
+> disclosed protocol correction, exact run presets, and verification steps.
+
 **SlopCodeBench** evaluates coding agents under iterative specification refinement: the agent implements a spec, then extends its own code as the spec changes. This exposes behaviors that single-shot benchmarks cannot measure, including path dependence, non-convergence, and trade-offs between explicit handling and structural stability. We release SCBench as an open, community-driven evaluation primitive rather than a finalized benchmark.
 
 

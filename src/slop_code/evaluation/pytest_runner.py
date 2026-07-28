@@ -383,6 +383,9 @@ markers =
             *timeout_args,
             f"--entrypoint={shlex.quote(entrypoint)}",
             f"--checkpoint={shlex.quote(self.checkpoint.name)}",
+            # Do not load an agent-authored conftest.py above the evaluation
+            # test directory. Its benchmark conftest remains discoverable.
+            f"--confcutdir={WORKSPACE_TEST_DIR}",
             "--ctrf=.scbench/ctrf-report.json",  # CTRF report output path
             "--json-report",
             "--json-report-file=.scbench/pytest-report.json",

@@ -18,6 +18,7 @@ from slop_code.metrics.languages.python import AST_GREP_RULES_DIR
 from slop_code.metrics.languages.python import AST_GREP_RULES_PATH
 from slop_code.metrics.languages.python import _get_ast_grep_rules_dir
 from slop_code.metrics.languages.python import _get_ast_grep_rules_path
+from slop_code.metrics.languages.python import _get_sg_executable
 from slop_code.metrics.languages.python import _is_sg_available
 from slop_code.metrics.languages.python import calculate_ast_grep_metrics
 from slop_code.metrics.languages.python.ast_grep import (
@@ -43,12 +44,27 @@ class TestSgAvailability:
     """Tests for _is_sg_available."""
 
     def test_sg_available_when_installed(self) -> None:
-        with patch("shutil.which", return_value="/usr/bin/sg"):
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch("shutil.which", return_value="/usr/bin/sg"),
+        ):
             assert _is_sg_available() is True
+            assert _get_sg_executable() == "/usr/bin/sg"
 
     def test_sg_unavailable_when_not_installed(self) -> None:
-        with patch("shutil.which", return_value=None):
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch("shutil.which", return_value=None),
+        ):
             assert _is_sg_available() is False
+
+    def test_explicit_binary_override(self, tmp_path: Path) -> None:
+        executable = tmp_path / "sg"
+        executable.write_text("", encoding="utf-8")
+        with patch.dict(
+            "os.environ", {"AST_GREP_BIN": str(executable)}, clear=True
+        ):
+            assert _get_sg_executable() == str(executable)
 
 
 # =============================================================================
@@ -120,20 +136,19 @@ class TestBuildAstGrepRulesLookup:
 class TestCalculateAstGrepMetrics:
     """Tests for calculate_ast_grep_metrics."""
 
-    def test_returns_empty_when_sg_unavailable(self, tmp_path: Path) -> None:
+    def test_fails_when_sg_unavailable(self, tmp_path: Path) -> None:
         source = _write(tmp_path, "test.py", "x = 1")
-        with patch(
-            "slop_code.metrics.languages.python.ast_grep.shutil.which",
-            return_value=None,
+        with (
+            patch.dict("os.environ", {}, clear=True),
+            patch(
+                "slop_code.metrics.languages.python.ast_grep.shutil.which",
+                return_value=None,
+            ),
+            pytest.raises(RuntimeError, match="ast-grep.*required"),
         ):
-            result = calculate_ast_grep_metrics(source)
+            calculate_ast_grep_metrics(source)
 
-        assert result.total_violations == 0
-        assert result.violations == []
-        assert result.counts == {}
-        assert result.rules_checked == 0
-
-    def test_returns_empty_when_rules_dir_missing(self, tmp_path: Path) -> None:
+    def test_fails_when_rules_file_missing(self, tmp_path: Path) -> None:
         source = _write(tmp_path, "test.py", "x = 1")
         with (
             patch(
@@ -143,13 +158,13 @@ class TestCalculateAstGrepMetrics:
             patch.dict(
                 "os.environ", {"AST_GREP_RULES_PATH": "/nonexistent.yaml"}
             ),
+            pytest.raises(
+                FileNotFoundError, match="rules file not found"
+            ),
         ):
-            result = calculate_ast_grep_metrics(source)
+            calculate_ast_grep_metrics(source)
 
-        assert result.total_violations == 0
-        assert result.rules_checked == 0
-
-    def test_returns_empty_when_no_rules(self, tmp_path: Path) -> None:
+    def test_fails_when_no_rules(self, tmp_path: Path) -> None:
         source = _write(tmp_path, "test.py", "x = 1")
         rules_path = tmp_path / "empty-rules.yaml"
         rules_path.write_text("")
@@ -160,11 +175,9 @@ class TestCalculateAstGrepMetrics:
                 return_value="/usr/bin/sg",
             ),
             patch.dict("os.environ", {"AST_GREP_RULES_PATH": str(rules_path)}),
+            pytest.raises(RuntimeError, match="contains no valid rules"),
         ):
-            result = calculate_ast_grep_metrics(source)
-
-        assert result.total_violations == 0
-        assert result.rules_checked == 0
+            calculate_ast_grep_metrics(source)
 
     def test_parses_violations_from_sg_output(self, tmp_path: Path) -> None:
         source = _write(
@@ -307,7 +320,7 @@ def bad():
         assert result.rules_checked == 2
         assert result.counts == {"first-rule": 1, "second-rule": 1}
 
-    def test_handles_subprocess_error_gracefully(self, tmp_path: Path) -> None:
+    def test_fails_on_subprocess_error(self, tmp_path: Path) -> None:
         source = _write(tmp_path, "test.py", "x = 1")
         rules_path = tmp_path / "rules.yaml"
         rules_path.write_text(
@@ -325,12 +338,35 @@ def bad():
             ) as mock_run,
         ):
             mock_run.side_effect = OSError("sg not found")
-            result = calculate_ast_grep_metrics(source)
+            with pytest.raises(RuntimeError, match="failed to run AST-grep"):
+                calculate_ast_grep_metrics(source)
 
-        assert result.total_violations == 0
-        assert result.rules_checked == 1  # We tried to check 1 rule
+    def test_fails_on_nonzero_scan(self, tmp_path: Path) -> None:
+        source = _write(tmp_path, "test.py", "x = 1")
+        rules_path = tmp_path / "rules.yaml"
+        rules_path.write_text(
+            "id: test\nlanguage: python\nrule:\n  pattern: 'x'"
+        )
 
-    def test_handles_malformed_json_gracefully(self, tmp_path: Path) -> None:
+        with (
+            patch(
+                "slop_code.metrics.languages.python.ast_grep.shutil.which",
+                return_value="/usr/bin/sg",
+            ),
+            patch.dict("os.environ", {"AST_GREP_RULES_PATH": str(rules_path)}),
+            patch(
+                "slop_code.metrics.languages.python.ast_grep.subprocess.run"
+            ) as mock_run,
+        ):
+            mock_run.return_value = MagicMock(
+                stdout="",
+                stderr="invalid rule",
+                returncode=2,
+            )
+            with pytest.raises(RuntimeError, match="scan failed"):
+                calculate_ast_grep_metrics(source)
+
+    def test_fails_on_malformed_json(self, tmp_path: Path) -> None:
         source = _write(tmp_path, "test.py", "x = 1")
         rules_path = tmp_path / "rules.yaml"
         rules_path.write_text("id: test")
@@ -350,11 +386,10 @@ def bad():
                 stderr="",
                 returncode=0,
             )
-            result = calculate_ast_grep_metrics(source)
+            with pytest.raises(RuntimeError, match="failed to parse"):
+                calculate_ast_grep_metrics(source)
 
-        assert result.total_violations == 0
-
-    def test_handles_missing_json_fields_gracefully(
+    def test_fails_on_missing_json_fields(
         self, tmp_path: Path
     ) -> None:
         source = _write(tmp_path, "test.py", "x = 1")
@@ -379,9 +414,8 @@ def bad():
                 stderr="",
                 returncode=0,
             )
-            result = calculate_ast_grep_metrics(source)
-
-        assert result.total_violations == 0
+            with pytest.raises(RuntimeError, match="failed to parse"):
+                calculate_ast_grep_metrics(source)
 
     def test_handles_empty_output(self, tmp_path: Path) -> None:
         source = _write(tmp_path, "test.py", "x = 1")

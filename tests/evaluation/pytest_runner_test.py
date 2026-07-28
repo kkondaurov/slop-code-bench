@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -279,6 +281,8 @@ class TestPytestRunner:
         assert "--entrypoint=" in cmd
         assert "--checkpoint=" in cmd
         assert "checkpoint_2" in cmd
+        # A submission-level conftest.py must not participate in collection.
+        assert f"--confcutdir={WORKSPACE_TEST_DIR}" in cmd
         # Static assets are now passed via env vars, not CLI
         assert "--static-assets" not in cmd
         assert "--ctrf=.scbench/ctrf-report.json" in cmd
@@ -299,6 +303,47 @@ class TestPytestRunner:
         cmd = pytest_runner._build_pytest_command()
 
         assert "--timeout" not in cmd
+
+    def test_confcutdir_isolates_submission_conftest(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """Hidden conftest loads without importing the submission conftest."""
+        evaluation_tests = tmp_path / WORKSPACE_TEST_DIR
+        evaluation_tests.mkdir()
+        (tmp_path / "conftest.py").write_text(
+            "raise RuntimeError('submission conftest loaded')\n"
+        )
+        (evaluation_tests / "conftest.py").write_text(
+            "import pytest\n\n"
+            "@pytest.fixture\n"
+            "def evaluation_fixture():\n"
+            "    return 'evaluation conftest loaded'\n"
+        )
+        (evaluation_tests / "test_checkpoint_1.py").write_text(
+            "def test_hidden_fixture(evaluation_fixture):\n"
+            "    assert evaluation_fixture == "
+            "'evaluation conftest loaded'\n"
+        )
+
+        result = subprocess.run(  # noqa: S603
+            [
+                sys.executable,
+                "-m",
+                "pytest",
+                f"--confcutdir={WORKSPACE_TEST_DIR}",
+                "-q",
+                WORKSPACE_TEST_DIR,
+            ],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "1 passed" in result.stdout
 
     def test_build_pytest_command_with_extra_args(self, pytest_runner):
         """_build_pytest_command includes extra pytest args."""

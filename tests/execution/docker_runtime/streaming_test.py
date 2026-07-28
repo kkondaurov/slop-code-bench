@@ -18,7 +18,7 @@ from slop_code.execution.runtime import SolutionRuntimeError
 from slop_code.execution.shared import HANDLE_ENTRY_NAME
 
 from .conftest import docker_available
-from .conftest import test_image_available
+from .conftest import test_image_available as requires_test_image
 
 
 class TestDockerStreamingRuntimeInit:
@@ -354,7 +354,7 @@ class TestDockerStreamingRuntimeCleanup:
 
 # Integration tests - require real Docker
 @docker_available
-@test_image_available
+@requires_test_image
 class TestDockerStreamingRuntimeIntegration:
     """Integration tests for DockerStreamingRuntime (require Docker)."""
 

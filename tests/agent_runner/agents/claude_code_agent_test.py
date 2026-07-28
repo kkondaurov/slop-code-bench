@@ -234,6 +234,21 @@ class TestClaudeCodeAgent:
             for value in session.last_spawn_mounts.values()
         )
 
+        agent_tmp_dir = agent.tmp_dir
+        assert agent_tmp_dir.exists()
+
+        agent.cleanup()
+
+        assert runtime.cleaned is True
+        assert not agent_tmp_dir.exists()
+        assert agent._session is None
+        assert agent._environment is None
+        assert agent._workspace is None
+        assert agent._runtime is None
+        assert agent._tmp_dir is None
+        assert agent._trace_dir is None
+        assert agent._settings_path is None
+
     def test_save_artifacts_logs_trace_counts(
         self,
         tmp_path,

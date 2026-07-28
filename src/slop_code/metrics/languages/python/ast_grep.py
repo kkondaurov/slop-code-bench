@@ -25,11 +25,23 @@ AST_GREP_CATEGORY = "slop"
 AST_GREP_RULES_PATH = Path(__file__).parents[5] / "configs" / "slop_rules.yaml"
 # Back-compat export; this now points at the single rules file.
 AST_GREP_RULES_DIR = AST_GREP_RULES_PATH
+AST_GREP_BIN_ENV = "AST_GREP_BIN"
+
+
+def _get_sg_executable() -> str | None:
+    """Resolve ast-grep from an explicit override or ``PATH``."""
+    override = os.environ.get(AST_GREP_BIN_ENV)
+    if override:
+        candidate = Path(override).expanduser()
+        if candidate.is_file():
+            return str(candidate)
+        return None
+    return shutil.which("sg")
 
 
 def _is_sg_available() -> bool:
     """Check if ast-grep (sg) is available on the system."""
-    return shutil.which("sg") is not None
+    return _get_sg_executable() is not None
 
 
 def _get_ast_grep_rules_path() -> Path:
@@ -72,30 +84,31 @@ def calculate_ast_grep_metrics(source: Path) -> AstGrepMetrics:
         source: Path to the Python source file.
 
     Returns:
-        AstGrepMetrics with violations found, or empty metrics if sg
-        unavailable.
+        AstGrepMetrics with violations found.
+
+    Raises:
+        RuntimeError: If ast-grep is unavailable or cannot produce valid
+            results.
+        FileNotFoundError: If the configured rules file does not exist.
     """
-    if not _is_sg_available():
-        logger.debug("ast-grep (sg) not available, skipping ast-grep metrics")
-        return AstGrepMetrics(
-            violations=[], total_violations=0, counts={}, rules_checked=0
+    sg_executable = _get_sg_executable()
+    if sg_executable is None:
+        raise RuntimeError(
+            "ast-grep (sg) is required for quality metrics; run "
+            "`UV_NO_CONFIG=1 uv sync --frozen`"
         )
 
     rules_path = _get_ast_grep_rules_path()
     if not rules_path.exists():
-        logger.warning(
-            "AST-grep rules file not found",
-            rules_path=str(rules_path),
-        )
-        return AstGrepMetrics(
-            violations=[], total_violations=0, counts={}, rules_checked=0
+        raise FileNotFoundError(
+            f"AST-grep rules file not found: {rules_path}"
         )
 
     rules_checked = _count_rules_in_file(rules_path)
 
     if rules_checked == 0:
-        return AstGrepMetrics(
-            violations=[], total_violations=0, counts={}, rules_checked=0
+        raise RuntimeError(
+            f"AST-grep rules file contains no valid rules: {rules_path}"
         )
 
     # Build lookup to get correct category/subcategory/weight from rule files
@@ -106,9 +119,9 @@ def calculate_ast_grep_metrics(source: Path) -> AstGrepMetrics:
     counts: Counter[str] = Counter()
     logger.debug("Running ast-grep rules", rules_path=str(rules_path))
     try:
-        result = subprocess.run(
+        result = subprocess.run(  # noqa: S603
             [
-                "sg",
+                sg_executable,
                 "scan",
                 "--json=stream",
                 "-r",
@@ -119,29 +132,13 @@ def calculate_ast_grep_metrics(source: Path) -> AstGrepMetrics:
             text=True,
             check=False,
         )
-    except OSError as e:
-        logger.debug(
-            "Failed to run ast-grep rules",
-            rules_path=str(rules_path),
-            error=str(e),
-        )
-        return AstGrepMetrics(
-            violations=[],
-            total_violations=0,
-            counts={},
-            rules_checked=rules_checked,
-        )
+    except OSError as exc:
+        raise RuntimeError(
+            f"failed to run AST-grep rules from {rules_path}: {exc}"
+        ) from exc
     if result.returncode != 0:
-        logger.warning(
-            "Failed to run ast-grep rules",
-            rules_path=str(rules_path),
-            error=result.stderr,
-        )
-        return AstGrepMetrics(
-            violations=[],
-            total_violations=0,
-            counts={},
-            rules_checked=rules_checked,
+        raise RuntimeError(
+            f"AST-grep scan failed for {source}: {result.stderr.strip()}"
         )
     # Parse JSON stream output (one JSON object per line)
     for line in result.stdout.strip().split("\n"):
@@ -164,13 +161,10 @@ def calculate_ast_grep_metrics(source: Path) -> AstGrepMetrics:
             )
             violations.append(violation)
             counts[violation.rule_id] += 1
-        except (json.JSONDecodeError, KeyError) as e:
-            logger.warning(
-                "Failed to parse ast-grep output",
-                line=line,
-                error=str(e),
-            )
-            continue
+        except (json.JSONDecodeError, KeyError) as exc:
+            raise RuntimeError(
+                f"failed to parse AST-grep output: {line!r}"
+            ) from exc
 
     return AstGrepMetrics(
         violations=violations,

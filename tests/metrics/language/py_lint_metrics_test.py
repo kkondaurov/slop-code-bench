@@ -54,7 +54,7 @@ class TestCalculateLintMetrics:
         # Verify subprocess was called with correct args
         mock_run.assert_called_once()
         call_args = mock_run.call_args[0][0]
-        assert call_args[0:3] == ["uv", "run", "ruff"]
+        assert call_args[0:4] == ["uv", "run", "--frozen", "ruff"]
         assert str(test_file.absolute()) in call_args
 
     def test_calculate_lint_metrics_no_errors(self, tmp_path, monkeypatch):

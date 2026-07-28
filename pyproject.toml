@@ -64,7 +64,11 @@ dependencies = [
     "networkx[default,pydot]>=3.6.1",
     "pydot>=4.0.1",
     "scikit-learn>=1.8.0",
+    "ast-grep-cli==0.42.0",
 ]
+
+[tool.uv]
+exclude-newer = "2026-03-24T21:59:00Z"
 
 
 [project.optional-dependencies]
@@ -109,6 +113,9 @@ packages = ["src/slop_code"]
 [tool.pytest.ini_options]
 minversion = "6.0"
 addopts = "--ignore=src --ignore=data --ignore=scratch --ignore=tests/evaluation/fixtures --ignore=tests/agent_runner/resources/"
+markers = [
+    "integration: requires a running Docker daemon",
+]
 testpaths = [
     "tests"
 ]
@@ -172,5 +179,3 @@ reportCallInDefaultInitializer = false
 reportAny = false
 reportUnusedCallResult = false
 reportUnannotatedClassAttribute = false
-
-

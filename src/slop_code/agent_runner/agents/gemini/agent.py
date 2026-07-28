@@ -27,6 +27,7 @@ from slop_code.common.llms import APIPricing
 from slop_code.common.llms import ModelDefinition
 from slop_code.common.llms import ThinkingPreset
 from slop_code.common.llms import TokenUsage
+from slop_code.common.temp import temporary_directory
 from slop_code.execution import DockerEnvironmentSpec
 from slop_code.execution import EnvironmentSpec
 from slop_code.execution import Session
@@ -245,7 +246,7 @@ class GeminiAgent(Agent):
         gemini_dir = Path(HOME_PATH) / ".gemini"
 
         if self._tmp_dir is None:
-            self._tmp_dir = tempfile.TemporaryDirectory()
+            self._tmp_dir = temporary_directory()
 
         tmp_auth_path = Path(self._tmp_dir.name) / "gemini"
 
@@ -521,6 +522,7 @@ class GeminiAgent(Agent):
             self._tmp_dir = None
 
         self._session = None
+        self._environment = None
 
 
 # Register this agent type with the agent registry

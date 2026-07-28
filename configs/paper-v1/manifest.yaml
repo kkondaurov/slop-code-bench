@@ -1,0 +1,188 @@
+schema_version: 1
+id: slopcodebench-paper-v1
+
+paper:
+  arxiv_id: "2603.24755"
+  version: v1
+  submitted: "2026-03-25"
+  url: https://arxiv.org/html/2603.24755v1
+
+source:
+  repository: https://github.com/SprocketLab/slop-code-bench
+  commit: 21dd1f58f408cd89b7acccdf5db969905aece51b
+  commit_date: "2026-03-24T17:59:00-04:00"
+  selection: >-
+    Last public repository commit before the paper-v1 submission. The paper
+    does not publish a source SHA; this snapshot matches its 20 problems, 93
+    checkpoints, and 137-rule verbosity implementation.
+
+corpus:
+  track: python
+  root: problems
+  problem_count: 20
+  checkpoint_count: 93
+  problems:
+    circuit_eval: 8
+    code_search: 5
+    dag_execution: 3
+    database_migration: 5
+    dynamic_buffer: 4
+    dynamic_config_service_api: 4
+    etl_pipeline: 5
+    eve_industry: 6
+    eve_jump_planner: 3
+    eve_market_tools: 4
+    eve_route_planner: 3
+    execution_server: 6
+    file_backup: 4
+    file_merger: 4
+    file_query_tool: 5
+    layered_config_synthesizer: 4
+    log_query: 5
+    metric_transform_lang: 5
+    migrate_configs: 5
+    trajectory_api: 5
+
+prompt:
+  name: just-solve
+  path: configs/prompts/just-solve.jinja
+  sha256: 663d8920c1f88f30f9fc51ff47328a083a61fd13e6db082a9707613a6aa725e3
+
+metrics:
+  ast_grep_rules:
+    path: configs/slop_rules.yaml
+    count: 137
+  verbosity:
+    numerator: union of AST-grep flagged SLOC and clone-covered SLOC
+    denominator: SLOC
+  structural_erosion:
+    callable_types:
+      - function
+      - method
+    mass: cyclomatic_complexity * sqrt(SLOC)
+    high_complexity_threshold: 10
+
+tooling:
+  lock_exclude_newer: "2026-03-24T21:59:00Z"
+  ast_grep:
+    version: "0.42.0"
+    release_date: "2026-03-16"
+    release_url: https://github.com/ast-grep/ast-grep/releases/tag/0.42.0
+    distribution: ast-grep-cli
+    requirement: ast-grep-cli==0.42.0
+    executable: sg
+    selection: >-
+      Latest official ast-grep release before the selected 24 March 2026
+      source snapshot. The paper does not report the ast-grep version, so
+      this is a documented best-evidence pin rather than a published fact.
+
+protocol:
+  environment: docker-python3.12-uv
+  execution_user: non-root
+  initial_workspace: empty except declared static problem assets
+  checkpoint_order: sequential
+  fresh_container_per_checkpoint: true
+  carry_forward: prior checkpoint working-directory snapshot only
+  reset_between_checkpoints:
+    - installed packages
+    - shell history
+    - agent session data
+    - conversation context
+  hidden_tests:
+    visible_to_agent: false
+    feedback_visible_to_agent: false
+    materialized_after_agent_session: true
+  timeout_seconds_per_checkpoint: 7200
+  turn_limit: 0
+  cost_limit_usd: 0
+  net_cost_limit_usd: 0
+  reasoning: high
+  pass_policy: any-case
+  pass_policy_purpose: continue the trajectory even after test failures
+  correctness:
+    strict: all checkpoint tests, including regressions
+    isolated: all current-checkpoint non-regression tests
+    core: current-checkpoint core tests only
+
+model_cli_matrix:
+  - paper_label: Sonnet 4.5
+    model: sonnet-4.5
+    provider: anthropic
+    agent: claude_code
+    harness: Claude Code
+    cli_version: 2.0.65
+    reasoning: high
+  - paper_label: Sonnet 4.6
+    model: sonnet-4.6
+    provider: anthropic
+    agent: claude_code
+    harness: Claude Code
+    cli_version: 2.1.44
+    reasoning: high
+  - paper_label: Opus 4.5
+    model: opus-4.5
+    provider: anthropic
+    agent: claude_code
+    harness: Claude Code
+    cli_version: 2.0.51
+    reasoning: high
+  - paper_label: Opus 4.6
+    model: opus-4.6
+    provider: anthropic
+    agent: claude_code
+    harness: Claude Code
+    cli_version: 2.1.32
+    reasoning: high
+  - paper_label: GPT 5.1 Codex Max
+    model: gpt-5.1-codex-max
+    provider: openai
+    agent: codex
+    harness: Codex CLI
+    cli_version: 0.65.0
+    reasoning: high
+  - paper_label: GPT 5.2
+    model: gpt-5.2
+    provider: openai
+    agent: codex
+    harness: Codex CLI
+    cli_version: 0.71.0
+    reasoning: high
+  - paper_label: GPT 5.2 Codex
+    model: gpt-5.2-codex
+    provider: openai
+    agent: codex
+    harness: Codex CLI
+    cli_version: 0.80.0
+    reasoning: high
+  - paper_label: GPT 5.3 Spark
+    model: gpt-5.3-codex-spark
+    provider: openai
+    agent: codex
+    harness: Codex CLI
+    cli_version: 0.100.0
+    reasoning: high
+  - paper_label: GPT 5.3 Codex
+    model: gpt-5.3-codex
+    provider: openai
+    agent: codex
+    harness: Codex CLI
+    cli_version: 0.98.0
+    reasoning: high
+  - paper_label: GPT 5.4
+    model: gpt-5.4
+    provider: openai
+    agent: codex
+    harness: Codex CLI
+    cli_version: 0.110.0
+    reasoning: high
+  - paper_label: GLM 4.7
+    model: glm-4.7
+    provider: zhipu-coding-plan
+    agent: claude_code
+    harness: Claude Code
+    cli_version: 2.0.76
+    reasoning: high
+
+base_configs:
+  codex: configs/runs/paper-v1-codex.yaml
+  claude_code: configs/runs/paper-v1-claude-code.yaml

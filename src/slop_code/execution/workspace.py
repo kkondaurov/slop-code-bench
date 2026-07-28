@@ -21,6 +21,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from slop_code.common import WORKSPACE_TEST_DIR
+from slop_code.common.temp import temporary_directory
 from slop_code.execution.assets import ResolvedStaticAsset
 from slop_code.execution.models import ExecutionError
 from slop_code.execution.snapshot import Snapshot
@@ -305,7 +306,7 @@ class Workspace:
         if self._temp_dir is not None:
             raise WorkspaceError("Workspace already prepared")
         logger.debug("Preparing workspace", verbose=True)
-        self._temp_dir = tempfile.TemporaryDirectory()
+        self._temp_dir = temporary_directory()
         self._prepare_initial_snapshot()
         logger.debug(
             "Workspace prepared",

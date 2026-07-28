@@ -12,6 +12,11 @@ MODULE_PATH = (
     / "graphing"
     / "pass_rate_scatter.py"
 )
+if not MODULE_PATH.exists():
+    pytest.skip(
+        "paper-v1 source snapshot omits scripts/graphing/pass_rate_scatter.py",
+        allow_module_level=True,
+    )
 SPEC = importlib.util.spec_from_file_location(
     "pass_rate_scatter_module", MODULE_PATH
 )

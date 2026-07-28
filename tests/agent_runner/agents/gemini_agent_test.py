@@ -227,8 +227,11 @@ class TestGeminiAgent:
 
         agent.cleanup()
 
-        # After cleanup, session is None
+        # After cleanup, no checkpoint-scoped state remains.
         assert agent._session is None
+        assert agent._environment is None
+        assert agent._runtime is None
+        assert agent._tmp_dir is None
 
     def test_reset_clears_state(self, tmp_path, mock_cost_limits, mock_pricing):
         """reset() clears internal state."""

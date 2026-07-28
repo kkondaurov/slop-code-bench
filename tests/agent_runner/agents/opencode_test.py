@@ -23,6 +23,7 @@ class FakeRuntime:
     def __init__(self) -> None:
         self.events: list[RuntimeEvent] = []
         self.cleaned = False
+        self.cleanup_calls = 0
         self.last_stream_args: tuple[tuple, dict] | None = None
         self.kill_calls = 0
 
@@ -38,6 +39,7 @@ class FakeRuntime:
 
     def cleanup(self) -> None:
         self.cleaned = True
+        self.cleanup_calls += 1
 
     def kill(self) -> None:
         self.kill_calls += 1
@@ -49,8 +51,11 @@ class FakeSession:
     working_dir: str
 
     spec: object | None = None
+    spawn_error: Exception | None = None
 
     def spawn(self, **_: object) -> FakeRuntime:  # pragma: no cover - trivial
+        if self.spawn_error is not None:
+            raise self.spawn_error
         return self.runtime
 
 
@@ -100,6 +105,66 @@ def _token_usage_from_part(part: dict[str, dict]) -> TokenUsage:
         cache_write=tokens["cache"].get("write", 0),
         reasoning=tokens["reasoning"],
     )
+
+
+def test_cleanup_clears_state_before_a_failed_fresh_setup(tmp_path) -> None:
+    first_runtime = FakeRuntime()
+    first_session = FakeSession(
+        runtime=first_runtime,
+        working_dir=str(tmp_path / "first"),
+    )
+    agent = OpenCodeAgent(
+        problem_name="sample-problem",
+        verbose=False,
+        cost_limits=AgentCostLimits(
+            step_limit=0,
+            cost_limit=100.0,
+            net_cost_limit=200.0,
+        ),
+        pricing=None,
+        credential=None,
+        model_id="glm-4.6",
+        provider="zai-coding-plan",
+        opencode_config={},
+        env={},
+        thinking=None,
+    )
+
+    agent.setup(first_session)
+    first_tmp_dir = agent.tmp_dir
+    first_storage_dir = agent._storage_dir
+
+    agent.cleanup()
+
+    assert first_runtime.cleanup_calls == 1
+    assert not first_tmp_dir.exists()
+    assert first_storage_dir is not None
+    assert not first_storage_dir.exists()
+    assert agent._runtime is None
+    assert agent._tmp_dir is None
+    assert agent._session is None
+    assert agent._storage_dir is None
+
+    second_runtime = FakeRuntime()
+    second_session = FakeSession(
+        runtime=second_runtime,
+        working_dir=str(tmp_path / "second"),
+        spawn_error=RuntimeError("fresh setup failed"),
+    )
+
+    with pytest.raises(RuntimeError, match="fresh setup failed"):
+        agent.setup(second_session)
+
+    # Match AgentRunner's exception-path cleanup. The prior runtime must not
+    # be cleaned a second time when the fresh session failed before spawning.
+    agent.cleanup()
+
+    assert first_runtime.cleanup_calls == 1
+    assert second_runtime.cleanup_calls == 0
+    assert agent._runtime is None
+    assert agent._tmp_dir is None
+    assert agent._session is None
+    assert agent._storage_dir is None
 
 
 def _runtime_events_from_stdout_chunks(

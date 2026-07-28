@@ -23,6 +23,7 @@ def calculate_type_check_metrics(source: Path) -> TypeCheckMetrics:
     cmd = [
         "uv",
         "run",
+        "--frozen",
         "ty",
         "check",
         "--output-format",

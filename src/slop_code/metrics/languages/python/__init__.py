@@ -11,6 +11,7 @@ from slop_code.metrics.languages.python.ast_grep import AST_GREP_RULES_DIR
 from slop_code.metrics.languages.python.ast_grep import AST_GREP_RULES_PATH
 from slop_code.metrics.languages.python.ast_grep import _get_ast_grep_rules_dir
 from slop_code.metrics.languages.python.ast_grep import _get_ast_grep_rules_path
+from slop_code.metrics.languages.python.ast_grep import _get_sg_executable
 from slop_code.metrics.languages.python.ast_grep import _is_sg_available
 from slop_code.metrics.languages.python.ast_grep import (
     calculate_ast_grep_metrics,
@@ -74,6 +75,7 @@ __all__ = [
     "calculate_ast_grep_metrics",
     "_get_ast_grep_rules_dir",
     "_get_ast_grep_rules_path",
+    "_get_sg_executable",
     "_is_sg_available",
     # Import extraction and tracing
     "extract_imports",

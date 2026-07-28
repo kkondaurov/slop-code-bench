@@ -1,0 +1,50 @@
+agent:
+  type: claude_code
+  binary: claude
+  permission_mode: bypassPermissions
+  version: 2.1.32
+  timeout: 7200
+  max_turns: null
+  extra_args: []
+  env: {}
+  cost_limits:
+    cost_limit: 0
+    step_limit: 0
+    net_cost_limit: 0
+
+environment: docker-python3.12-uv
+prompt: just-solve
+
+model:
+  provider: anthropic
+  name: opus-4.6
+
+thinking: high
+pass_policy: any-case
+one_shot:
+  enabled: false
+
+problems:
+  - circuit_eval
+  - code_search
+  - dag_execution
+  - database_migration
+  - dynamic_buffer
+  - dynamic_config_service_api
+  - etl_pipeline
+  - eve_industry
+  - eve_jump_planner
+  - eve_market_tools
+  - eve_route_planner
+  - execution_server
+  - file_backup
+  - file_merger
+  - file_query_tool
+  - layered_config_synthesizer
+  - log_query
+  - metric_transform_lang
+  - migrate_configs
+  - trajectory_api
+
+save_dir: outputs/paper-v1
+save_template: "${model.name}/${agent.type}-${agent.version}_${prompt}_${thinking}_${now:%Y%m%dT%H%M%S}"

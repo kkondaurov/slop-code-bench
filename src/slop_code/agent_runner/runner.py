@@ -27,6 +27,7 @@ from slop_code.evaluation import CorrectnessResults
 from slop_code.evaluation import PassPolicy
 from slop_code.evaluation import ProblemConfig
 from slop_code.evaluation import run_checkpoint as evaluate_checkpoint
+from slop_code.execution import DockerEnvironmentSpec
 from slop_code.execution import EnvironmentSpec
 from slop_code.execution import Session
 from slop_code.execution import SnapshotDiff
@@ -53,6 +54,7 @@ def get_artifacts_path(checkpoint_save_dir: Path, *, compress: bool) -> Path:
 def create_agent_session(
     problem_config: ProblemConfig,
     environment_spec: EnvironmentSpec,
+    base_dir: Path | None = None,
 ) -> Session:
     """Create an execution session for an agent.
 
@@ -61,6 +63,7 @@ def create_agent_session(
     Args:
         problem_config: Configuration for the problem being solved
         environment_spec: Specification for the execution environment
+        base_dir: Optional prior checkpoint snapshot to restore
 
     Returns:
         Configured Session ready for agent execution
@@ -76,7 +79,7 @@ def create_agent_session(
     )
     return Session.from_environment_spec(
         spec=environment_spec,
-        base_dir=None,
+        base_dir=base_dir,
         static_assets=static_assets,
         is_agent_infer=True,
     )
@@ -402,6 +405,7 @@ class AgentRunner:
         )
         self.progress_thread: threading.Thread | None = None
         self.results: list[AgentCheckpointSummary] = []
+        self._has_executed_checkpoint = False
 
     @property
     def session(self) -> Session:
@@ -410,7 +414,7 @@ class AgentRunner:
         return self._session
 
     def setup(self) -> None:
-        """Create session, initialize metrics, start progress monitoring, setup output directory."""
+        """Initialize metrics, progress monitoring, and the output directory."""
         is_resuming = self.resume_info is not None
         logger.info(
             "Setting up agent run",
@@ -458,22 +462,6 @@ class AgentRunner:
             )
         )
 
-        # Create session and enter context
-        self._session = create_agent_session(
-            problem_config=self.run_spec.problem,
-            environment_spec=self.run_spec.environment,
-        )
-        self._session.__enter__()
-
-        # Materialize assets: fresh runs do it explicitly, resume does it in restore_from_snapshot_dir
-        if is_resuming and self.resume_info.last_snapshot_dir:
-            self._session.restore_from_snapshot_dir(
-                self.resume_info.last_snapshot_dir
-            )
-            self._run_resume_commands()
-        else:
-            self._session.materialize_assets()
-
         # Start progress monitoring
         self.progress_thread = threading.Thread(
             target=agent_progress_watcher,
@@ -507,7 +495,19 @@ class AgentRunner:
         # Execute each resume command with its own runtime
         for cmd in resume_commands:
             logger.debug("Running resume command", command=cmd)
-            runtime = self.session.exec(command=cmd, disable_setup=True)
+            runtime_kwargs: dict[str, str] = {}
+            if isinstance(
+                self.run_spec.environment,
+                DockerEnvironmentSpec,
+            ):
+                runtime_kwargs["user"] = (
+                    self.run_spec.environment.get_eval_user()
+                )
+            runtime = self.session.exec(
+                command=cmd,
+                disable_setup=True,
+                **runtime_kwargs,
+            )
             try:
                 result = runtime.execute(env={}, stdin=None, timeout=300)
                 if result.exit_code != 0:
@@ -554,35 +554,68 @@ class AgentRunner:
         logger.info("Problem run completed", problem=self.run_spec.problem.name)
         return results
 
-    def _setup_for_checkpoint(self, checkpoint: CheckpointConfig) -> None:
-        # Update agent state for this checkpoint
-        if self.metrics_tracker.state in {
-            AgentStateEnum.INITIALIZED,
-            AgentStateEnum.PENDING,
-        }:
+    def _setup_for_checkpoint(
+        self,
+        checkpoint: CheckpointConfig,
+        prior_snapshot_dir: Path | None,
+    ) -> None:
+        """Start a fresh agent session for one checkpoint.
+
+        Only the prior checkpoint snapshot is restored. Runtime state such as
+        the container, home directory, shell history, and installed packages
+        is deliberately not carried across checkpoint boundaries.
+        """
+        if self._session is not None:
+            raise AgentRunnerError("Previous checkpoint session is still open")
+
+        if self._has_executed_checkpoint:
             logger.info(
-                "Starting agent for the first checkpoint",
+                "Resetting agent context for the checkpoint",
                 checkpoint=checkpoint.name,
             )
-            self.agent.setup(session=self.session)
-            return
+            self.agent.finish_checkpoint(reset_context=True)
 
         logger.info(
-            "Resetting agent context for the checkpoint",
+            "Starting fresh agent session for checkpoint",
             checkpoint=checkpoint.name,
+            has_prior_snapshot=prior_snapshot_dir is not None,
         )
-        self.agent.finish_checkpoint(reset_context=True)
+        self._session = create_agent_session(
+            problem_config=self.run_spec.problem,
+            environment_spec=self.run_spec.environment,
+            base_dir=prior_snapshot_dir,
+        )
+        try:
+            self._session.__enter__()
+            self._session.materialize_assets()
+            if prior_snapshot_dir is not None:
+                self._run_resume_commands()
+            self.agent.setup(session=self._session)
+        except BaseException:
+            self._cleanup_checkpoint_session()
+            raise
+
+    def _cleanup_checkpoint_session(self) -> None:
+        """Tear down agent/runtime/workspace state at a checkpoint boundary."""
+        if self._session is None:
+            return
+
+        session = self._session
+        try:
+            try:
+                self.agent.cleanup()
+            finally:
+                session.__exit__(None, None, None)
+        finally:
+            self._session = None
 
     def finish(self) -> dict[str, Any]:
         """Cleanup agent, stop monitoring, save final results."""
         logger.debug("Finishing agent run", problem=self.run_spec.problem.name)
 
-        # Cleanup agent
-        self.agent.cleanup()
-
-        # Close session
-        if self._session is not None:
-            self._session.__exit__(None, None, None)
+        # Normally each checkpoint has already torn down its own session. This
+        # is also the exception-path safety net.
+        self._cleanup_checkpoint_session()
 
         # Save final results
         final_results = reporting.save_results(
@@ -631,32 +664,38 @@ class AgentRunner:
         checkpoint: CheckpointConfig,
         checkpoint_save_dir: Path,
         is_first_checkpoint: bool,
+        prior_snapshot_dir: Path | None,
     ) -> AgentCheckpointSummary:
-        self._setup_for_checkpoint(checkpoint)
-        self.metrics_tracker.state = AgentStateEnum.RUNNING
         compress = self.run_spec.compress_artifacts
-        snapshot_dir, result, diff = run_checkpoint(
-            agent=self.agent,
-            session=self.session,
-            save_dir=checkpoint_save_dir,
-            checkpoint=checkpoint,
-            problem=self.run_spec.problem,
-            environment=self.run_spec.environment,
-            template=self.run_spec.template,
-            replay_path=self.replay_path,
-            is_first_checkpoint=is_first_checkpoint,
-            compress_artifacts=compress,
-            agent_type=self.run_spec.agent_type,
-            agent_version=self.run_spec.agent_version,
-            model_name=self.run_spec.model_name,
-        )
-        reporting.save_agent_checkpoint_info(
-            checkpoint_save_dir,
-            diff,
-            result,
-            self.agent,
-            compress_artifacts=compress,
-        )
+        self._setup_for_checkpoint(checkpoint, prior_snapshot_dir)
+        self.metrics_tracker.state = AgentStateEnum.RUNNING
+        try:
+            snapshot_dir, result, diff = run_checkpoint(
+                agent=self.agent,
+                session=self.session,
+                save_dir=checkpoint_save_dir,
+                checkpoint=checkpoint,
+                problem=self.run_spec.problem,
+                environment=self.run_spec.environment,
+                template=self.run_spec.template,
+                replay_path=self.replay_path,
+                is_first_checkpoint=is_first_checkpoint,
+                compress_artifacts=compress,
+                agent_type=self.run_spec.agent_type,
+                agent_version=self.run_spec.agent_version,
+                model_name=self.run_spec.model_name,
+            )
+            reporting.save_agent_checkpoint_info(
+                checkpoint_save_dir,
+                diff,
+                result,
+                self.agent,
+                compress_artifacts=compress,
+            )
+        finally:
+            # Hidden tests are materialized only after the agent container and
+            # workspace have been destroyed.
+            self._cleanup_checkpoint_session()
         artifacts_path = get_artifacts_path(
             checkpoint_save_dir, compress=compress
         )
@@ -828,6 +867,9 @@ class AgentRunner:
         )
 
         results = []
+        prior_snapshot_dir = (
+            self.resume_info.last_snapshot_dir if self.resume_info else None
+        )
         for idx, (checkpoint, checkpoint_save_dir) in enumerate(
             get_checkpoints(self.run_spec.problem, self.output_path)
         ):
@@ -847,6 +889,7 @@ class AgentRunner:
                     self.metrics_tracker.finish_checkpoint(
                         existing_summary.usage
                     )
+                    prior_snapshot_dir = existing_summary.snapshot_dir
                 continue
 
             logger.info(
@@ -863,8 +906,11 @@ class AgentRunner:
                 checkpoint,
                 checkpoint_save_dir,
                 idx == 0,
+                prior_snapshot_dir,
             )
             results.append(summary)
+            self._has_executed_checkpoint = True
+            prior_snapshot_dir = summary.snapshot_dir
             self.metrics_tracker.finish_checkpoint(self.agent.usage)
 
             logger.info(
