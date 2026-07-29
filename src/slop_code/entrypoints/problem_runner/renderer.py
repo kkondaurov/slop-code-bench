@@ -100,10 +100,7 @@ class ProblemProgressRenderer:
         total_iso_passed = 0
 
         for _, state in self._state.problems():
-            if state.overall_usage:
-                total_cost += state.overall_usage.cost
-            if state.agent_usage:
-                total_cost += state.agent_usage.cost
+            total_cost += state.net_cost
             if state.state in _TERMINAL_STATES:
                 problems_done += 1
             total_evaluated += state.total_checkpoints_evaluated
@@ -257,7 +254,7 @@ class ProblemProgressRenderer:
             )
             return None
 
-        total_cost = state.overall_usage.cost + (state.agent_usage.cost or 0.0)
+        total_cost = state.net_cost
         steps = state.agent_usage.steps or 0
         checkpoint_elapsed = state.get_checkpoint_elapsed_time()
         elapsed_mins = int(checkpoint_elapsed // 60)

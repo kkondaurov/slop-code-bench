@@ -24,6 +24,7 @@ from pathlib import Path
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import field_serializer
 
 from slop_code.common import WORKSPACE_TEST_DIR
 from slop_code.execution.assets import ResolvedStaticAsset
@@ -131,6 +132,14 @@ class SnapshotConfig(BaseModel):
         default=None,
         description="Directory to save snapshot archives.",
     )
+
+    @field_serializer("keep_globs", "ignore_globs", when_used="json")
+    def serialize_globs(
+        self,
+        value: set[str] | None,
+    ) -> list[str] | None:
+        """Serialize unordered glob sets deterministically for provenance."""
+        return None if value is None else sorted(value)
 
 
 class LocalConfig(BaseModel):

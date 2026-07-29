@@ -21,7 +21,7 @@
 > disclosed protocol correction, byte-level input lock, automatic run
 > provenance, exact presets, and publication-ready verification steps.
 > Clone `https://github.com/kkondaurov/slop-code-bench.git` and use the
-> `paper-v1-repro.1` tag for citable experiments.
+> `paper-v1-repro.2` tag for citable experiments.
 
 **SlopCodeBench** evaluates coding agents under iterative specification refinement: the agent implements a spec, then extends its own code as the spec changes. This exposes behaviors that single-shot benchmarks cannot measure, including path dependence, non-convergence, and trade-offs between explicit handling and structural stability. We release SCBench as an open, community-driven evaluation primitive rather than a finalized benchmark.
 

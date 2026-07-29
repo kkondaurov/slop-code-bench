@@ -228,6 +228,8 @@ class ProblemState(BaseModel):
     @property
     def net_cost(self) -> float:
         """Total cost including current checkpoint."""
+        if self.state == AgentStateEnum.COMPLETED:
+            return self.prior_cost
         return self.prior_cost + self.checkpoint_cost
 
     def _get_token_metrics(self) -> dict[str, int]:

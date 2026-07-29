@@ -210,7 +210,7 @@ clean worktree:
 git clone https://github.com/kkondaurov/slop-code-bench.git
 cd slop-code-bench
 git fetch --tags
-git switch --detach paper-v1-repro.1
+git switch --detach paper-v1-repro.2
 git status --short
 UV_NO_CONFIG=1 uv sync --frozen
 UV_NO_CONFIG=1 uv run --frozen python scripts/verify_paper_v1.py \
@@ -218,7 +218,7 @@ UV_NO_CONFIG=1 uv run --frozen python scripts/verify_paper_v1.py \
 ```
 
 `git status --short` must print nothing. Publication mode also requires HEAD to
-be exactly at `paper-v1-repro.1`; the verifier must pass before the run. Then
+be exactly at `paper-v1-repro.2`; the verifier must pass before the run. Then
 invoke one of the exact commands above. Preserve and publish the complete run
 directory together with the command you used and the tag. The run's
 `provenance.json` binds the results to the suite inputs, resolved configuration,

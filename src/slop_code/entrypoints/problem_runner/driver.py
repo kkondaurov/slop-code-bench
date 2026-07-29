@@ -172,7 +172,7 @@ def _run_problems(
             problem_states.handle_update(
                 problem_name, agent_usage, metrics_tracker
             )
-            net_cost = metrics_tracker.usage.cost + (agent_usage.cost or 0.0)
+            net_cost = problem_states[problem_name].net_cost
 
             logger.info(
                 f"'{problem_name}': progress update",
