@@ -148,12 +148,18 @@ def _scb_check_command(*arguments: str) -> list[str]:
 
 
 def _scb_check_environment() -> dict[str, str]:
+    configured_cache = os.environ.get("UV_CACHE_DIR")
     environment = {
         key: value
         for key, value in os.environ.items()
         if not key.startswith("UV_")
     }
     environment["UV_NO_CONFIG"] = "1"
+    # The cache location cannot change dependency resolution under --frozen,
+    # but preserving it lets callers select a writable cache on restricted
+    # hosts. Other ambient uv overrides remain scrubbed.
+    if configured_cache:
+        environment["UV_CACHE_DIR"] = str(Path(configured_cache).absolute())
     configured_venv = os.environ.get(SCB_CHECK_VENV_ENV)
     if configured_venv:
         environment["UV_PROJECT_ENVIRONMENT"] = str(

@@ -1112,7 +1112,7 @@ class TestGetCheckpointMetrics:
             ),
         ]
 
-    def test_scb_check_environment_scrubs_ambient_uv_overrides(
+    def test_scb_check_environment_scrubs_semantic_uv_overrides(
         self, monkeypatch: pytest.MonkeyPatch
     ):
         monkeypatch.setenv("UV_NO_SYNC", "1")
@@ -1125,7 +1125,7 @@ class TestGetCheckpointMetrics:
         assert environment["UV_NO_CONFIG"] == "1"
         assert "UV_NO_SYNC" not in environment
         assert "UV_PROJECT_ENVIRONMENT" not in environment
-        assert "UV_CACHE_DIR" not in environment
+        assert environment["UV_CACHE_DIR"] == str(Path("ambient-cache").absolute())
         assert environment["SCB_CHECK_TEST_SENTINEL"] == "preserved"
 
     def test_scb_check_environment_uses_only_controlled_external_venv(

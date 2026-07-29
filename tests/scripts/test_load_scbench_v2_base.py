@@ -11,7 +11,7 @@ EXPECTED_IMAGE_ID = (
 EXPECTED_ARCHIVE_SHA256 = (
     "dff52ff24d1d7e7d88525ef403b374d6464d3331c2b3df1ce72e4d56a3ec5df9"
 )
-EXPECTED_RELEASE_TAG = "scbench-v2-repro.3"
+EXPECTED_RELEASE_TAG = "scbench-v2-repro.4"
 EXPECTED_RELEASE_ROOT = (
     "https://github.com/kkondaurov/slop-code-bench/releases"
 )
