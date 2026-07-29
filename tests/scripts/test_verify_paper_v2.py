@@ -44,6 +44,10 @@ def test_checked_in_lock_and_manifest_agree() -> None:
         )
     )
 
+    # Provenance embeds this object verbatim; YAML timestamps must therefore
+    # remain quoted strings rather than Python datetime objects.
+    json.dumps(manifest, allow_nan=False)
+
     assert lock["problem_count"] == 36
     assert lock["checkpoint_count"] == 196
     assert sum(lock["problems"].values()) == 196

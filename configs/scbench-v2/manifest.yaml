@@ -10,8 +10,8 @@ runner:
   repository: https://github.com/kkondaurov/slop-code-bench
   upstream_repository: https://github.com/SprocketLab/slop-code-bench
   base_commit: 13de1a7a6b8b3dc5cc532a0c322a0997afa5bec7
-  release_tag: scbench-v2-repro.1
-  release_url: https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2-repro.1
+  release_tag: scbench-v2-repro.2
+  release_url: https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2-repro.2
   selection: >-
     Current upstream base selected for the reproducible fork. It includes
     post-paper correctness fixes and is therefore not claimed to be the
@@ -55,8 +55,8 @@ protocol:
     archive:
       path: outputs/reproducibility-images/slopcodebench-base-scb-v2-linux-arm64-image-d2b862aad2bf.tar.zst
       checksum_file: configs/scbench-v2/release-assets.sha256
-      download_url: https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2-repro.1/slopcodebench-base-scb-v2-linux-arm64-image-d2b862aad2bf.tar.zst
-      checksum_url: https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2-repro.1/release-assets.sha256
+      download_url: https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2-repro.2/slopcodebench-base-scb-v2-linux-arm64-image-d2b862aad2bf.tar.zst
+      checksum_url: https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2-repro.2/release-assets.sha256
       size_bytes: 1097630979
       sha256: dff52ff24d1d7e7d88525ef403b374d6464d3331c2b3df1ce72e4d56a3ec5df9
       compression: zstd
@@ -66,7 +66,7 @@ protocol:
     note: >-
       This is the fully built Docker image after applying the environment
       setup recipe, not the upstream parent manifest digest. The verified
-      archive is published with the scbench-v2-repro.1 GitHub release.
+      archive is published with the scbench-v2-repro.2 GitHub release.
   prompt: just-solve
   prompt_sha256: 663d8920c1f88f30f9fc51ff47328a083a61fd13e6db082a9707613a6aa725e3
   seed: 42
@@ -159,8 +159,8 @@ profiles:
     reasoning: xhigh
     release_evidence:
       registry: https://registry.npmjs.org/@openai%2Fcodex/0.146.0
-      checked_at: 2026-07-29T11:24:57Z
-      published_at: 2026-07-29T01:42:51Z
+      checked_at: "2026-07-29T11:24:57Z"
+      published_at: "2026-07-29T01:42:51Z"
       prerelease: false
       package_integrity: >-
         sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==

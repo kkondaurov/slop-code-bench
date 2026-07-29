@@ -47,6 +47,11 @@ an infrastructure failure as model behavior:
 - Several published manifest claims were descriptive rather than verified
   against the actual environment, evaluator invocation, profile configuration,
   and pinned tool recipe.
+- The first public harness tag, `scbench-v2-repro.1`, left two ISO timestamps
+  unquoted in YAML. The first real reference diagnostic stopped before model
+  work when provenance refused to serialize the resulting `datetime` values.
+  Tag `scbench-v2-repro.2` quotes those values and makes JSON compatibility a
+  verifier invariant. The base-image bytes and checksum were unaffected.
 
 Repairs are covered by adversarial tests for the reproduced failure modes.
 The final snapshot format preserves safe relative symlinks, executable modes,
@@ -109,7 +114,7 @@ Confirmed release gates:
 - The catalog bytes are exact for `scb-problems` release `v1.0`; the runner is
   based on public upstream commit `13de1a7` plus the reviewed fixes in this
   fork, published as
-  [`scbench-v2-repro.1`](https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2-repro.1).
+  [`scbench-v2-repro.2`](https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2-repro.2).
   It is not the unpublished byte-exact paper runner.
 - `scb-check==0.1.3` is a pinned reconstruction choice because the paper did
   not publish the evaluator version.

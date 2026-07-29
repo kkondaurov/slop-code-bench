@@ -35,16 +35,16 @@ locked and should not be conflated:
   architecture instead of rerunning setup.
 
 The frozen harness is published as
-[`scbench-v2-repro.1`](https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2-repro.1).
+[`scbench-v2-repro.2`](https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2-repro.2).
 Its `linux/arm64` base image and
-[`release-assets.sha256`](https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2-repro.1/release-assets.sha256)
+[`release-assets.sha256`](https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2-repro.2/release-assets.sha256)
 are release assets. Download the image to the loader's default path, or pass an
 existing local copy explicitly:
 
 ```bash
 mkdir -p outputs/reproducibility-images
 curl -fL \
-  https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2-repro.1/slopcodebench-base-scb-v2-linux-arm64-image-d2b862aad2bf.tar.zst \
+  https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2-repro.2/slopcodebench-base-scb-v2-linux-arm64-image-d2b862aad2bf.tar.zst \
   -o outputs/reproducibility-images/slopcodebench-base-scb-v2-linux-arm64-image-d2b862aad2bf.tar.zst
 ```
 
@@ -169,4 +169,4 @@ The immutable experiment facts and profile semantics live in
 `configs/scbench-v2/manifest.yaml`; the catalog bytes are locked by
 `configs/scbench-v2/content-lock.json`. Source and release assets are bound to
 the public
-[`scbench-v2-repro.1` release](https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2-repro.1).
+[`scbench-v2-repro.2` release](https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2-repro.2).

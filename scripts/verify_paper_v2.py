@@ -43,7 +43,7 @@ UPSTREAM_RUNNER_REPOSITORY = (
     "https://github.com/SprocketLab/slop-code-bench"
 )
 RUNNER_BASE_COMMIT = "13de1a7a6b8b3dc5cc532a0c322a0997afa5bec7"
-RELEASE_TAG = "scbench-v2-repro.1"
+RELEASE_TAG = "scbench-v2-repro.2"
 RELEASE_URL = f"{REPRODUCIBILITY_REPOSITORY}/releases/tag/{RELEASE_TAG}"
 PREBUILT_ARCHIVE_NAME = (
     "slopcodebench-base-scb-v2-linux-arm64-image-d2b862aad2bf.tar.zst"
@@ -185,6 +185,12 @@ def verify_suite_manifest(
         return [f"cannot safely read suite manifest: {exc}"]
     if not isinstance(manifest, dict):
         return ["suite manifest must be an object"]
+    try:
+        json.dumps(manifest, allow_nan=False)
+    except (TypeError, ValueError):
+        errors.append(
+            "suite manifest must contain only JSON-compatible values"
+        )
     if manifest.get("schema_version") != MANIFEST_SCHEMA_VERSION:
         errors.append("suite manifest schema version mismatch")
     if manifest.get("id") != MANIFEST_ID:
