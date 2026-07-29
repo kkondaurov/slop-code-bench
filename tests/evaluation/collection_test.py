@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from slop_code import evaluation
 from slop_code.common import WORKSPACE_TEST_DIR
 from slop_code.evaluation.collection import _build_collect_cmd
+from slop_code.evaluation.collection import _parse_collect_stdout
 from slop_code.evaluation.collection import compute_tc_hash
 
 
@@ -45,3 +46,39 @@ def test_compute_tc_hash_stable_for_reordered_input() -> None:
     )
 
     assert hash_a == hash_b
+
+
+def test_collect_stdout_keeps_spaces_inside_parameter_ids() -> None:
+    stdout = """
+============================= test session starts ==============================
+tests/test_checkpoint_3.py::test_metadata[title-Episode One]
+tests/test_checkpoint_3.py::test_metadata[description-Episode Description]
+ERROR tests/test_checkpoint_3.py::test_noise collection failed
+tests/test_checkpoint_3.py::test_noise PASSED
+========================== 2 tests collected in 0.01s ==========================
+"""
+
+    nodeids = _parse_collect_stdout(stdout)
+    expected_nodeids = [
+        "tests/test_checkpoint_3.py::test_metadata[title-Episode One]",
+        (
+            "tests/test_checkpoint_3.py::"
+            "test_metadata[description-Episode Description]"
+        ),
+    ]
+
+    assert nodeids == expected_nodeids
+    assert len(nodeids) == 2
+
+    collected_test_ids = [nodeid.split("::", 1)[1] for nodeid in nodeids]
+    expected_test_ids = [nodeid.split("::", 1)[1] for nodeid in expected_nodeids]
+    collection_hash = compute_tc_hash(
+        {"checkpoint_3-Core": collected_test_ids}
+    )
+
+    assert collection_hash == compute_tc_hash(
+        {"checkpoint_3-Core": expected_test_ids}
+    )
+    assert collection_hash != compute_tc_hash(
+        {"checkpoint_3-Core": expected_test_ids[:1]}
+    )

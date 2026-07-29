@@ -198,8 +198,18 @@ def _parse_collect_stdout(stdout: str) -> list[str]:
             continue
         if "::" not in stripped:
             continue
-        if " " in stripped:
-            continue
+
+        if any(char.isspace() for char in stripped):
+            file_path, test_id = stripped.split("::", 1)
+            parameter_start = test_id.find("[")
+            if parameter_start < 0 or not test_id.endswith("]"):
+                continue
+            if any(
+                char.isspace()
+                for char in (file_path + test_id[:parameter_start])
+            ):
+                continue
+
         nodeids.append(stripped)
     return nodeids
 

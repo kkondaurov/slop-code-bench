@@ -52,6 +52,12 @@ an infrastructure failure as model behavior:
   work when provenance refused to serialize the resulting `datetime` values.
   Tag `scbench-v2-repro.2` quotes those values and makes JSON compatibility a
   verifier invariant. The base-image bytes and checksum were unaffected.
+- The first `.2` reference diagnostic then exposed an incomplete test
+  collection hash: pytest node IDs containing spaces inside parameter values
+  were discarded even though those tests executed and contributed to the
+  pass counts. The diagnostic was stopped after two durable checkpoints.
+  `scbench-v2-repro.3` preserves those node IDs and regression-tests the exact
+  observed cases; no `.2` result is treated as a benchmark baseline.
 
 Repairs are covered by adversarial tests for the reproduced failure modes.
 The final snapshot format preserves safe relative symlinks, executable modes,
@@ -86,7 +92,7 @@ Confirmed release gates:
 - `DOCKER_HOST=unix:///Users/kkonstant/.colima/default/docker.sock
   TMPDIR=<checkout>/tmp/pytest-host UV_NO_CONFIG=1
   UV_CACHE_DIR=/private/tmp/slopcodebench-uv-cache .venv/bin/pytest -q`:
-  2,054 passed, 3 skipped.
+  2,055 passed, 3 skipped.
 - `UV_NO_CONFIG=1 uv run --frozen python scripts/verify_paper_v2.py`: 36
   problems, 196 checkpoints, catalog tree
   `199ae38f7dc07b5bbaba3683ca98e783c3a800f27ee4b1075fa2fa14d32d1249`.
@@ -114,7 +120,7 @@ Confirmed release gates:
 - The catalog bytes are exact for `scb-problems` release `v1.0`; the runner is
   based on public upstream commit `13de1a7` plus the reviewed fixes in this
   fork, published as
-  [`scbench-v2-repro.2`](https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2-repro.2).
+  [`scbench-v2-repro.3`](https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2-repro.3).
   It is not the unpublished byte-exact paper runner.
 - `scb-check==0.1.3` is a pinned reconstruction choice because the paper did
   not publish the evaluator version.

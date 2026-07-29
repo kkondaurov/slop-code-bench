@@ -69,9 +69,9 @@ one-time setup, diagnostic gate, and full-run commands. Named profiles also
 place host temporary workspaces under the checkout so Docker VMs can mount
 them reliably. The reproducibility fork, immutable tag, and locked base-image
 asset are published in the
-[`scbench-v2-repro.2` GitHub release](https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2-repro.2);
+[`scbench-v2-repro.3` GitHub release](https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2-repro.3);
 the image is available at its
-[deterministic release URL](https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2-repro.2/slopcodebench-base-scb-v2-linux-arm64-image-d2b862aad2bf.tar.zst).
+[deterministic release URL](https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2-repro.3/slopcodebench-base-scb-v2-linux-arm64-image-d2b862aad2bf.tar.zst).
 
 ### Troubleshooting
 
