@@ -1,16 +1,52 @@
 """Tests for snapshot diff functionality."""
 
+import os
+import tarfile
 import tempfile
 from pathlib import Path
+from typing import BinaryIO
 
 import pytest
 
+from slop_code.execution import snapshot as snapshot_module
+from slop_code.execution.models import ExecutionError
+from slop_code.execution.snapshot import SYMLINK_TARGET_TYPE_PAX
 from slop_code.execution.snapshot import FileChangeType
 from slop_code.execution.snapshot import FileDiff
 from slop_code.execution.snapshot import Snapshot
 from slop_code.execution.snapshot import _create_text_file_diff
 from slop_code.execution.snapshot import _decode_text
 from slop_code.execution.snapshot import _is_binary
+from slop_code.execution.snapshot import _safe_archive_member_path
+from slop_code.execution.snapshot import _safe_relative_symlink_target
+
+
+@pytest.mark.parametrize(
+    "member_name",
+    [
+        r"C:\workspace\escape.py",
+        "C:/workspace/escape.py",
+        r"..\escape.py",
+        r"\\server\share\escape.py",
+    ],
+)
+def test_archive_member_rejects_windows_path_syntax(member_name: str) -> None:
+    with pytest.raises(ExecutionError, match="Unsafe snapshot archive member"):
+        _safe_archive_member_path(member_name)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        r"C:\workspace\escape.py",
+        "C:/workspace/escape.py",
+        r"..\escape.py",
+        r"\\server\share\escape.py",
+    ],
+)
+def test_symlink_target_rejects_windows_path_syntax(target: str) -> None:
+    with pytest.raises(ExecutionError, match="Unsafe snapshot symlink target"):
+        _safe_relative_symlink_target(Path("alias.py"), target)
 
 
 class TestIsBinary:
@@ -143,6 +179,486 @@ class TestSnapshot:
             assert Path("file2.txt") in contents
             assert Path("subdir/file3.txt") in contents
             assert contents[Path("file1.txt")] == b"line1\nline2\n"
+
+    def test_extract_to_path_preserves_executable_mode(
+        self, temp_workspace, tmp_path
+    ):
+        """Checkpoint carry-forward keeps executable regular files executable."""
+        executable = temp_workspace / "run.sh"
+        executable.write_text("#!/bin/sh\nexit 0\n")
+        executable.chmod(0o755)
+        archive_dir = tmp_path / "archives"
+        archive_dir.mkdir()
+        target = tmp_path / "restored"
+
+        snapshot = Snapshot.from_directory(
+            cwd=temp_workspace,
+            env={},
+            save_path=archive_dir,
+        )
+        snapshot.extract_to_path(target)
+
+        assert (target / "run.sh").stat().st_mode & 0o777 == 0o755
+
+    def test_extract_to_path_preserves_file_times_and_lru_order(
+        self,
+        temp_workspace: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Distinct atimes survive without silently becoming mtimes."""
+        first = temp_workspace / "first.cache"
+        second = temp_workspace / "second.cache"
+        first.write_text("first", encoding="utf-8")
+        second.write_text("second", encoding="utf-8")
+        os.utime(
+            first,
+            ns=(1_900_000_001_123_456_789, 1_700_000_004_123_456_789),
+        )
+        os.utime(
+            second,
+            ns=(1_900_000_002_987_654_321, 1_700_000_003_987_654_321),
+        )
+        expected = {
+            path.name: (path.stat().st_atime_ns, path.stat().st_mtime_ns)
+            for path in (first, second)
+        }
+        archive_dir = tmp_path / "archives"
+        archive_dir.mkdir()
+        target = tmp_path / "restored"
+
+        snapshot = Snapshot.from_directory(
+            cwd=temp_workspace,
+            env={},
+            save_path=archive_dir,
+        )
+        snapshot.extract_to_path(target)
+
+        restored = {
+            name: (
+                (target / name).stat().st_atime_ns,
+                (target / name).stat().st_mtime_ns,
+            )
+            for name in expected
+        }
+        assert restored == expected
+        assert sorted(expected, key=lambda name: expected[name][0]) == [
+            "first.cache",
+            "second.cache",
+        ]
+        assert sorted(restored, key=lambda name: restored[name][0]) == [
+            "first.cache",
+            "second.cache",
+        ]
+
+    @pytest.mark.skipif(
+        os.utime not in os.supports_follow_symlinks,
+        reason="host cannot set symlink mtime without following it",
+    )
+    def test_extract_to_path_preserves_symlink_times_ns(
+        self,
+        temp_workspace: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Checkpoint carry-forward restores symlink metadata, not its target."""
+        source = temp_workspace / "alias.txt"
+        source.symlink_to("file1.txt")
+        requested_atime_ns = 1_900_000_000_123_456_789
+        requested_mtime_ns = 1_700_000_000_987_654_321
+        os.utime(
+            source,
+            ns=(requested_atime_ns, requested_mtime_ns),
+            follow_symlinks=False,
+        )
+        expected_atime_ns = source.lstat().st_atime_ns
+        expected_mtime_ns = source.lstat().st_mtime_ns
+        target_mtime_ns = (temp_workspace / "file1.txt").stat().st_mtime_ns
+        archive_dir = tmp_path / "archives"
+        archive_dir.mkdir()
+        target = tmp_path / "restored"
+
+        snapshot = Snapshot.from_directory(
+            cwd=temp_workspace,
+            env={},
+            save_path=archive_dir,
+        )
+        snapshot.extract_to_path(target)
+
+        restored = target / "alias.txt"
+        assert restored.lstat().st_atime_ns == expected_atime_ns
+        assert restored.lstat().st_mtime_ns == expected_mtime_ns
+        assert (target / "file1.txt").stat().st_mtime_ns == target_mtime_ns
+
+    def test_extract_to_path_preserves_empty_nested_directory_metadata(
+        self,
+        temp_workspace: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Empty directories retain existence, mode, and exact mtime."""
+        outer = temp_workspace / "empty-parent"
+        nested = outer / "empty-child"
+        nested.mkdir(parents=True)
+        outer.chmod(0o751)
+        nested.chmod(0o705)
+        outer_atime_ns = 1_900_000_001_987_654_321
+        outer_mtime_ns = 1_700_000_001_123_456_789
+        nested_atime_ns = 1_900_000_002_123_456_789
+        nested_mtime_ns = 1_700_000_002_987_654_321
+        os.utime(outer, ns=(outer_atime_ns, outer_mtime_ns))
+        os.utime(nested, ns=(nested_atime_ns, nested_mtime_ns))
+        expected_outer_atime_ns = outer.stat().st_atime_ns
+        expected_nested_atime_ns = nested.stat().st_atime_ns
+        expected_outer_mtime_ns = outer.stat().st_mtime_ns
+        expected_nested_mtime_ns = nested.stat().st_mtime_ns
+        archive_dir = tmp_path / "archives"
+        archive_dir.mkdir()
+        target = tmp_path / "restored"
+
+        snapshot = Snapshot.from_directory(
+            cwd=temp_workspace,
+            env={},
+            save_path=archive_dir,
+        )
+        snapshot.extract_to_path(target)
+
+        restored_outer = target / "empty-parent"
+        restored_nested = restored_outer / "empty-child"
+        assert restored_nested.is_dir()
+        assert restored_outer.stat().st_mode & 0o777 == 0o751
+        assert restored_nested.stat().st_mode & 0o777 == 0o705
+        assert restored_outer.stat().st_atime_ns == expected_outer_atime_ns
+        assert restored_nested.stat().st_atime_ns == expected_nested_atime_ns
+        assert restored_outer.stat().st_mtime_ns == expected_outer_mtime_ns
+        assert restored_nested.stat().st_mtime_ns == expected_nested_mtime_ns
+
+    def test_extract_to_path_preserves_workspace_root_metadata(
+        self,
+        temp_workspace: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Root mode and timestamps are applied after all child writes."""
+        temp_workspace.chmod(0o711)
+        requested_atime_ns = 1_900_000_003_123_456_789
+        requested_mtime_ns = 1_700_000_003_987_654_321
+        os.utime(
+            temp_workspace,
+            ns=(requested_atime_ns, requested_mtime_ns),
+        )
+        expected = temp_workspace.stat()
+        archive_dir = tmp_path / "archives"
+        archive_dir.mkdir()
+        target = tmp_path / "restored"
+
+        snapshot = Snapshot.from_directory(
+            cwd=temp_workspace,
+            env={},
+            save_path=archive_dir,
+        )
+        snapshot.extract_to_path(target)
+
+        restored = target.stat()
+        assert restored.st_mode & 0o777 == 0o711
+        assert restored.st_atime_ns == expected.st_atime_ns
+        assert restored.st_mtime_ns == expected.st_mtime_ns
+
+    def test_extract_rejects_archive_checksum_mismatch(
+        self,
+        temp_workspace: Path,
+        tmp_path: Path,
+    ) -> None:
+        """Stored checksums gate every archive consumer before parsing."""
+        archive_dir = tmp_path / "archives"
+        archive_dir.mkdir()
+        snapshot = Snapshot.from_directory(
+            cwd=temp_workspace,
+            env={},
+            save_path=archive_dir,
+        )
+        with snapshot.archive.open("ab") as archive:
+            archive.write(b"post-capture mutation")
+
+        target = tmp_path / "restored"
+        with pytest.raises(ExecutionError, match="checksum mismatch"):
+            snapshot.extract_to_path(target)
+        assert not target.exists()
+
+    @pytest.mark.skipif(not hasattr(Path, "symlink_to"), reason="no symlinks")
+    def test_extract_to_path_preserves_safe_relative_symlink(
+        self, temp_workspace, tmp_path
+    ):
+        """Safe in-workspace relative links survive checkpoint carry-forward."""
+        (temp_workspace / "alias.txt").symlink_to("file1.txt")
+        archive_dir = tmp_path / "archives"
+        archive_dir.mkdir()
+        target = tmp_path / "restored"
+
+        snapshot = Snapshot.from_directory(
+            cwd=temp_workspace,
+            env={},
+            save_path=archive_dir,
+        )
+        snapshot.extract_to_path(target)
+
+        restored = target / "alias.txt"
+        assert restored.is_symlink()
+        assert restored.readlink() == Path("file1.txt")
+        assert restored.read_text() == "line1\nline2\n"
+
+    @pytest.mark.skipif(not hasattr(Path, "symlink_to"), reason="no symlinks")
+    def test_snapshot_preserves_directory_symlink_type_for_windows(
+        self,
+        temp_workspace: Path,
+        tmp_path: Path,
+    ) -> None:
+        """PAX metadata carries the flag Windows needs to create a dir link."""
+        (temp_workspace / "directory-alias").symlink_to(
+            "subdir",
+            target_is_directory=True,
+        )
+        archive_dir = tmp_path / "archives"
+        archive_dir.mkdir()
+        target = tmp_path / "restored"
+
+        snapshot = Snapshot.from_directory(
+            cwd=temp_workspace,
+            env={},
+            save_path=archive_dir,
+        )
+        with tarfile.open(snapshot.archive, "r:gz") as archive:
+            member = archive.getmember("directory-alias")
+            assert member.pax_headers[SYMLINK_TARGET_TYPE_PAX] == "directory"
+
+        snapshot.extract_to_path(target)
+
+        restored = target / "directory-alias"
+        assert restored.is_symlink()
+        assert restored.is_dir()
+        assert restored.readlink() == Path("subdir")
+
+    def test_snapshot_rejects_workspace_escaping_symlink(
+        self, temp_workspace, tmp_path
+    ):
+        """A snapshot cannot capture a link that escapes the workspace."""
+        (temp_workspace / "escape").symlink_to("../outside")
+        archive_dir = tmp_path / "archives"
+        archive_dir.mkdir()
+
+        with pytest.raises(ExecutionError, match="escapes the workspace"):
+            Snapshot.from_directory(
+                cwd=temp_workspace,
+                env={},
+                save_path=archive_dir,
+            )
+
+    def test_snapshot_materializes_hardlinks_as_regular_files(
+        self, temp_workspace, tmp_path
+    ):
+        """Repeated inodes remain restorable without unsafe tar hard links."""
+        original = temp_workspace / "hardlink-source"
+        linked = temp_workspace / "hardlink-copy"
+        original.write_text("shared inode\n", encoding="utf-8")
+        os.link(original, linked)
+        archive_dir = tmp_path / "archives"
+        archive_dir.mkdir()
+        target = tmp_path / "restored"
+
+        snapshot = Snapshot.from_directory(
+            cwd=temp_workspace,
+            env={},
+            save_path=archive_dir,
+        )
+        snapshot.extract_to_path(target)
+
+        assert (target / "hardlink-source").read_text() == "shared inode\n"
+        assert (target / "hardlink-copy").read_text() == "shared inode\n"
+
+    def test_snapshot_rejects_file_mutated_during_capture(
+        self,
+        temp_workspace,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Descriptor-pinned capture detects a concurrent writer."""
+        source = temp_workspace / "file1.txt"
+        archive_dir = tmp_path / "archives"
+        archive_dir.mkdir()
+        original_addfile = tarfile.TarFile.addfile
+
+        def addfile_then_mutate(
+            archive: tarfile.TarFile,
+            tar_info: tarfile.TarInfo,
+            fileobj=None,
+        ) -> None:
+            original_addfile(archive, tar_info, fileobj)
+            if tar_info.name == "file1.txt":
+                with source.open("a", encoding="utf-8") as handle:
+                    handle.write("concurrent-write\n")
+
+        monkeypatch.setattr(tarfile.TarFile, "addfile", addfile_then_mutate)
+
+        with pytest.raises(ExecutionError, match="changed during capture"):
+            Snapshot.from_directory(
+                cwd=temp_workspace,
+                env={},
+                save_path=archive_dir,
+            )
+
+        assert list(archive_dir.iterdir()) == []
+
+    def test_snapshot_rejects_same_size_rewrite_with_restored_mtime(
+        self,
+        temp_workspace: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Ctime catches a rewrite that restores size and mtime."""
+        source = temp_workspace / "file1.txt"
+        original = source.stat()
+        replacement = b"x" * original.st_size
+        archive_dir = tmp_path / "archives"
+        archive_dir.mkdir()
+        original_addfile = tarfile.TarFile.addfile
+
+        def addfile_then_rewrite(
+            archive: tarfile.TarFile,
+            tar_info: tarfile.TarInfo,
+            fileobj=None,
+        ) -> None:
+            original_addfile(archive, tar_info, fileobj)
+            if tar_info.name == "file1.txt":
+                source.write_bytes(replacement)
+                os.utime(
+                    source,
+                    ns=(original.st_atime_ns, original.st_mtime_ns),
+                )
+
+        monkeypatch.setattr(tarfile.TarFile, "addfile", addfile_then_rewrite)
+
+        with pytest.raises(ExecutionError, match="changed during capture"):
+            Snapshot.from_directory(
+                cwd=temp_workspace,
+                env={},
+                save_path=archive_dir,
+            )
+
+        assert source.stat().st_size == original.st_size
+        assert source.stat().st_mtime_ns == original.st_mtime_ns
+        assert source.stat().st_ctime_ns != original.st_ctime_ns
+        assert list(archive_dir.iterdir()) == []
+
+    @pytest.mark.skipif(
+        not snapshot_module._supports_descriptor_safe_extraction(),  # noqa: SLF001
+        reason="host has no descriptor-safe extraction primitives",
+    )
+    def test_extract_parent_symlink_swap_cannot_redirect_output(
+        self,
+        temp_workspace: Path,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A renamed parent cannot redirect output or pass final validation."""
+        source_parent = temp_workspace / "raced-parent"
+        source_parent.mkdir()
+        (source_parent / "payload.txt").write_text(
+            "pinned payload\n",
+            encoding="utf-8",
+        )
+        archive_dir = tmp_path / "archives"
+        archive_dir.mkdir()
+        snapshot = Snapshot.from_directory(
+            cwd=temp_workspace,
+            env={},
+            save_path=archive_dir,
+        )
+        target = tmp_path / "restored"
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        renamed_parent = target / "descriptor-pinned-parent"
+        original_writer = snapshot_module._write_regular_member_at  # noqa: SLF001
+        swapped = False
+
+        def swap_parent_then_write(
+            parent_fd: int,
+            member: tarfile.TarInfo,
+            source: BinaryIO,
+            *,
+            uid: int | None,
+            gid: int | None,
+        ) -> None:
+            nonlocal swapped
+            if member.name == "raced-parent/payload.txt":
+                raced_parent = target / "raced-parent"
+                raced_parent.rename(renamed_parent)
+                raced_parent.symlink_to(outside, target_is_directory=True)
+                swapped = True
+            original_writer(
+                parent_fd,
+                member,
+                source,
+                uid=uid,
+                gid=gid,
+            )
+
+        monkeypatch.setattr(
+            snapshot_module,
+            "_write_regular_member_at",
+            swap_parent_then_write,
+        )
+
+        with pytest.raises(
+            ExecutionError,
+            match="changed before metadata restore",
+        ):
+            snapshot.extract_to_path(target)
+
+        assert swapped
+        assert (renamed_parent / "payload.txt").read_text(
+            encoding="utf-8"
+        ) == "pinned payload\n"
+        assert not (outside / "payload.txt").exists()
+
+    @pytest.mark.skipif(not hasattr(Path, "symlink_to"), reason="no symlinks")
+    def test_extract_rejects_symlinked_target_root(
+        self,
+        temp_workspace,
+        tmp_path,
+    ) -> None:
+        """Extraction never accepts a root redirected through a symlink."""
+        archive_dir = tmp_path / "archives"
+        archive_dir.mkdir()
+        snapshot = Snapshot.from_directory(
+            cwd=temp_workspace,
+            env={},
+            save_path=archive_dir,
+        )
+        real_target = tmp_path / "real-target"
+        real_target.mkdir()
+        linked_target = tmp_path / "linked-target"
+        linked_target.symlink_to(real_target, target_is_directory=True)
+
+        with pytest.raises(ExecutionError, match="traverses a symlink"):
+            snapshot.extract_to_path(linked_target)
+
+    @pytest.mark.skipif(not hasattr(Path, "symlink_to"), reason="no symlinks")
+    def test_extract_rejects_symlinked_target_ancestor(
+        self,
+        temp_workspace,
+        tmp_path,
+    ) -> None:
+        """A symlink in any extraction-root ancestor is rejected."""
+        archive_dir = tmp_path / "archives"
+        archive_dir.mkdir()
+        snapshot = Snapshot.from_directory(
+            cwd=temp_workspace,
+            env={},
+            save_path=archive_dir,
+        )
+        real_parent = tmp_path / "real-parent"
+        real_parent.mkdir()
+        linked_parent = tmp_path / "linked-parent"
+        linked_parent.symlink_to(real_parent, target_is_directory=True)
+
+        with pytest.raises(ExecutionError, match="traverses a symlink"):
+            snapshot.extract_to_path(linked_parent / "nested")
 
     def test_archive_snapshot_extract_text_contents(self, temp_workspace):
         """Test extracting text contents from an archive snapshot."""

@@ -11,8 +11,42 @@ ENV XDG_CONFIG_HOME="$HOME/.config"
 ENV XDG_DATA_HOME="$HOME/.local/share"
 
 # --- Install Codex dependencies --------------------------------------------
-RUN npm install -g @openai/codex@{{ version }} && \
+{% if npm_package_integrity %}
+RUN set -eu; \
+    download_dir="$(mktemp -d)"; \
+    cd "$download_dir"; \
+    case "$(uname -m)" in \
+      aarch64|arm64) \
+        platform_alias='codex-linux-arm64'; \
+        platform_version='{{ version }}-linux-arm64'; \
+        platform_integrity='{{ npm_linux_arm64_integrity }}'; \
+        ;; \
+      x86_64|amd64) \
+        platform_alias='codex-linux-x64'; \
+        platform_version='{{ version }}-linux-x64'; \
+        platform_integrity='{{ npm_linux_x64_integrity }}'; \
+        ;; \
+      *) echo "Unsupported Codex container architecture: $(uname -m)" >&2; exit 1 ;; \
+    esac; \
+    wrapper_tarball="$(npm pack --silent '@openai/codex@{{ version }}')"; \
+    platform_tarball="$(npm pack --silent "@openai/codex@${platform_version}")"; \
+    verify_sri() { \
+      actual_sri="$(node -e "const c=require('crypto'),f=require('fs');process.stdout.write('sha512-'+c.createHash('sha512').update(f.readFileSync(process.argv[1])).digest('base64'))" "$1")"; \
+      test "$actual_sri" = "$2"; \
+    }; \
+    verify_sri "$wrapper_tarball" '{{ npm_package_integrity }}'; \
+    verify_sri "$platform_tarball" "$platform_integrity"; \
+    npm install -g --offline --omit=optional --no-audit --no-fund "./$wrapper_tarball"; \
+    platform_dir="$NPM_CONFIG_PREFIX/lib/node_modules/@openai/codex/node_modules/@openai/$platform_alias"; \
+    mkdir -p "$platform_dir"; \
+    tar -xzf "$platform_tarball" --strip-components=1 -C "$platform_dir"; \
+    cd /workspace; \
+    rm -rf "$download_dir"; \
     mkdir -p "$HOME/.codex"
+{% else %}
+RUN npm install -g '@openai/codex@{{ version }}' && \
+    mkdir -p "$HOME/.codex"
+{% endif %}
 
 # --- Default shell ----------------------------------------------------------
 CMD ["codex"]

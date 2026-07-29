@@ -379,6 +379,22 @@ class Agent(ABC):
         proper cleanup of any resources (environments, connections, etc.).
         """
 
+    def cleanup_for_session(self) -> None:
+        """Release agent state while leaving Session-owned runtimes alone.
+
+        CLI agents conventionally retain their spawned runtime in
+        ``_runtime`` and their public ``cleanup()`` closes it. During a managed
+        Session, that runtime is owned by the Session and must be closed there
+        exactly once. Temporarily detaching the conventional reference lets
+        agent cleanup release temp homes and other state without double-closing
+        the same process/container.
+        """
+        missing = object()
+        runtime = getattr(self, "_runtime", missing)
+        if runtime is not missing:
+            setattr(self, "_runtime", None)
+        self.cleanup()
+
     def hit_net_rate_limit(self) -> bool:
         """Check if the agent has hit a rate limit.
 

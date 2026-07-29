@@ -819,8 +819,13 @@ class TestGetCheckpointMetrics:
         # Should return default fields when all metric files are missing
         assert result["is_first"] is False
         assert result["is_last"] is False
-        # May also include erosion metrics with default values
-        assert "erosion_velocity" in result or len(result) == 2
+        assert result["scb_check"]["status"] == "missing_snapshot"
+        assert result["scb_check"]["resolved_version"] is None
+        assert result["scb_check"]["record_persisted"] is True
+        record = (
+            tmp_path / QUALITY_DIR / checkpoint_driver.SCB_CHECK_RECORD_FILENAME
+        )
+        assert record.exists()
 
     def test_uses_scb_check_report_for_composite_quality_numbers(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -856,6 +861,8 @@ class TestGetCheckpointMetrics:
 
         def fake_run(command, **kwargs):
             commands.append(command)
+            if command[-1] == "--version":
+                return SimpleNamespace(stdout="0.1.3\n")
             return SimpleNamespace(
                 stdout=json.dumps(
                     {
@@ -872,22 +879,38 @@ class TestGetCheckpointMetrics:
 
         result = get_checkpoint_metrics(tmp_path)
 
-        assert commands == [
-            [
-                "uvx",
-                "scb-check",
-                "check",
-                "--report",
-                "--include-all",
-                str(tmp_path / "snapshot"),
-            ]
-        ]
+        assert commands[0] == checkpoint_driver._scb_check_command("--version")
+        assert commands[1][:-1] == checkpoint_driver._scb_check_command(
+            "check",
+            "--report",
+            "--include-all",
+        )
+        assert Path(commands[1][-1]).name == "snapshot"
+        assert Path(commands[1][-1]) != tmp_path / "snapshot"
         assert result["verbosity"] == pytest.approx(0.5)
         assert result["erosion"] == pytest.approx(0.2)
         assert result["cloned_sloc_lines"] == 10
         assert result["cloned_pct"] == pytest.approx(0.25)
         assert result["verbosity_flagged_sloc_lines"] == 12
         assert result["verbosity_flagged_pct"] == pytest.approx(0.3)
+        assert result["scb_check"]["status"] == "measured"
+        assert result["scb_check"]["requested_version"] == "0.1.3"
+        assert result["scb_check"]["resolved_version"] == "0.1.3"
+        assert result["scb_check"]["snapshot_preserved"] is True
+        assert result["scb_check"]["record_persisted"] is True
+        assert len(result["scb_check"]["snapshot_tree_sha256"]) == 64
+        assert result["scb_check"]["snapshot_hash_algorithm"] == (
+            checkpoint_driver.SCB_CHECK_SNAPSHOT_HASH_ALGORITHM
+        )
+
+        record_path = (
+            tmp_path / QUALITY_DIR / checkpoint_driver.SCB_CHECK_RECORD_FILENAME
+        )
+        record = json.loads(record_path.read_text())
+        assert record["status"] == "measured"
+        assert record["resolved_version"] == "0.1.3"
+        assert record["record_persisted"] is True
+        assert record["report"]["verbosity"] == pytest.approx(0.5)
 
     def test_scb_check_failure_does_not_drop_other_checkpoint_metrics(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -915,6 +938,8 @@ class TestGetCheckpointMetrics:
         )
 
         def fake_run(command, **kwargs):
+            if command[-1] == "--version":
+                return SimpleNamespace(stdout="0.1.3\n")
             raise checkpoint_driver.subprocess.CalledProcessError(
                 returncode=2,
                 cmd=command,
@@ -929,6 +954,480 @@ class TestGetCheckpointMetrics:
         assert "verbosity" not in result
         assert "erosion" not in result
         assert "cloned_pct" not in result
+        assert result["scb_check"]["status"] == "failed"
+        assert result["scb_check"]["resolved_version"] == "0.1.3"
+        assert result["scb_check"]["snapshot_preserved"] is True
+        assert result["scb_check"]["record_persisted"] is True
+        assert result["scb_check"]["error"]["returncode"] == 2
+
+        record_path = (
+            tmp_path / QUALITY_DIR / checkpoint_driver.SCB_CHECK_RECORD_FILENAME
+        )
+        record = json.loads(record_path.read_text())
+        assert record["status"] == "failed"
+        assert record["report"] is None
+
+    def test_scb_check_version_mismatch_is_explicit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        (tmp_path / "snapshot").mkdir()
+
+        def fake_run(command, **kwargs):
+            assert command[-1] == "--version"
+            return SimpleNamespace(stdout="0.2.0\n")
+
+        monkeypatch.setattr(checkpoint_driver.subprocess, "run", fake_run)
+
+        result = checkpoint_driver._get_scb_check_metrics(tmp_path)
+
+        assert result["scb_check"]["status"] == "failed"
+        assert result["scb_check"]["requested_version"] == "0.1.3"
+        assert result["scb_check"]["resolved_version"] is None
+        assert "expected '0.1.3'" in result["scb_check"]["error"]["message"]
+
+    def test_scb_check_version_is_resolved_for_each_measurement(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        checkpoints = [tmp_path / "checkpoint_1", tmp_path / "checkpoint_2"]
+        for checkpoint in checkpoints:
+            (checkpoint / "snapshot").mkdir(parents=True)
+
+        version_calls = 0
+        check_calls = 0
+
+        def fake_run(command, **kwargs):
+            nonlocal version_calls, check_calls
+            if command[-1] == "--version":
+                version_calls += 1
+                return SimpleNamespace(stdout="0.1.3\n")
+            check_calls += 1
+            return SimpleNamespace(
+                stdout=json.dumps({"verbosity": 0.5, "erosion": 0.2})
+            )
+
+        monkeypatch.setattr(checkpoint_driver.subprocess, "run", fake_run)
+
+        results = [
+            checkpoint_driver._get_scb_check_metrics(checkpoint)
+            for checkpoint in checkpoints
+        ]
+
+        assert version_calls == 2
+        assert check_calls == 2
+        assert all(
+            result["scb_check"]["resolved_version"] == "0.1.3"
+            for result in results
+        )
+
+    def test_scb_check_record_persistence_failure_is_not_measured(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        (tmp_path / "snapshot").mkdir()
+
+        def fake_run(command, **kwargs):
+            if command[-1] == "--version":
+                return SimpleNamespace(stdout="0.1.3\n")
+            return SimpleNamespace(
+                stdout=json.dumps({"verbosity": 0.5, "erosion": 0.2})
+            )
+
+        def fail_write(*args, **kwargs):
+            raise OSError("quality evidence is unwritable")
+
+        monkeypatch.setattr(checkpoint_driver.subprocess, "run", fake_run)
+        monkeypatch.setattr(
+            checkpoint_driver,
+            "_write_scb_check_record",
+            fail_write,
+        )
+
+        result = checkpoint_driver._get_scb_check_metrics(tmp_path)
+
+        assert "verbosity" not in result
+        assert "erosion" not in result
+        assert result["scb_check"]["status"] == "failed"
+        assert result["scb_check"]["record_persisted"] is False
+        assert result["scb_check"]["record_error"]["phase"] == (
+            "persist_record"
+        )
+        assert (
+            result["scb_check"]["error"] == result["scb_check"]["record_error"]
+        )
+
+    def test_scb_check_record_target_symlink_is_not_followed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        quality_dir = tmp_path / QUALITY_DIR
+        quality_dir.mkdir()
+        outside = tmp_path.parent / f"{tmp_path.name}-outside-record.json"
+        outside.write_text("preserve me\n", encoding="utf-8")
+        target = quality_dir / checkpoint_driver.SCB_CHECK_RECORD_FILENAME
+        target.symlink_to(outside)
+
+        metadata = checkpoint_driver._persist_scb_check_record(
+            tmp_path,
+            {"status": "measured"},
+        )
+
+        assert metadata["record_persisted"] is False
+        assert metadata["record_error"]["phase"] == "persist_record"
+        assert outside.read_text(encoding="utf-8") == "preserve me\n"
+
+    def test_scb_check_preflight_records_frozen_environment(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        commands: list[list[str]] = []
+
+        def fake_run(command, **kwargs):
+            commands.append(command)
+            assert kwargs["env"]["UV_NO_CONFIG"] == "1"
+            if command == ["uv", "--version"]:
+                return SimpleNamespace(stdout="uv 0.10.8\n")
+            if "python" in command:
+                return SimpleNamespace(stdout="3.12.1\n")
+            return SimpleNamespace(stdout="0.1.3\n")
+
+        monkeypatch.setattr(checkpoint_driver.subprocess, "run", fake_run)
+
+        evidence = checkpoint_driver.scb_check_preflight()
+
+        assert evidence["status"] == "verified"
+        assert evidence["resolved_version"] == "0.1.3"
+        assert evidence["python_version"] == "3.12.1"
+        assert evidence["lock_sha256"] == (
+            checkpoint_driver.scb_check_lock_sha256()
+        )
+        assert any(
+            package["name"] == "scb-check" and package["version"] == "0.1.3"
+            for package in evidence["packages"]
+        )
+        assert commands == [
+            checkpoint_driver._scb_check_command("--version"),
+            ["uv", "--version"],
+            checkpoint_driver._evaluator_command(
+                "python",
+                "-c",
+                "import platform; print(platform.python_version())",
+            ),
+        ]
+
+    def test_scb_check_environment_scrubs_ambient_uv_overrides(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("UV_NO_SYNC", "1")
+        monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", "ambient-environment")
+        monkeypatch.setenv("UV_CACHE_DIR", "ambient-cache")
+        monkeypatch.setenv("SCB_CHECK_TEST_SENTINEL", "preserved")
+
+        environment = checkpoint_driver._scb_check_environment()
+
+        assert environment["UV_NO_CONFIG"] == "1"
+        assert "UV_NO_SYNC" not in environment
+        assert "UV_PROJECT_ENVIRONMENT" not in environment
+        assert "UV_CACHE_DIR" not in environment
+        assert environment["SCB_CHECK_TEST_SENTINEL"] == "preserved"
+
+    def test_scb_check_environment_uses_only_controlled_external_venv(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        controlled = tmp_path / "controlled-venv"
+        monkeypatch.setenv("UV_PROJECT_ENVIRONMENT", "ambient-venv")
+        monkeypatch.setenv(
+            checkpoint_driver.SCB_CHECK_VENV_ENV,
+            str(controlled),
+        )
+
+        environment = checkpoint_driver._scb_check_environment()
+
+        assert environment["UV_PROJECT_ENVIRONMENT"] == str(controlled)
+
+    def test_scb_check_metadata_requires_strict_hex_snapshot_hash(self):
+        identity = checkpoint_driver._evaluator_identity()
+        metadata = {
+            "evaluator": checkpoint_driver.SCB_CHECK_NAME,
+            "requested_version": checkpoint_driver.SCB_CHECK_VERSION,
+            "resolved_version": checkpoint_driver.SCB_CHECK_VERSION,
+            "status": "measured",
+            "record_persisted": True,
+            "snapshot_preserved": True,
+            "snapshot_tree_sha256": "z" * 64,
+            "snapshot_hash_algorithm": (
+                checkpoint_driver.SCB_CHECK_SNAPSHOT_HASH_ALGORITHM
+            ),
+            "environment_project_sha256": identity["project_sha256"],
+            "environment_lock_sha256": identity["lock_sha256"],
+        }
+
+        assert not checkpoint_driver.is_valid_scb_check_metadata(metadata)
+
+    def test_evaluator_identity_drift_fails_before_check(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        (tmp_path / "snapshot").mkdir()
+        stable = {
+            "project_dir": "/verified",
+            "project_sha256": "a" * 64,
+            "lock_sha256": "b" * 64,
+        }
+        changed = {**stable, "lock_sha256": "c" * 64}
+        identities = iter([stable, changed])
+        monkeypatch.setattr(
+            checkpoint_driver,
+            "_evaluator_identity",
+            lambda: next(identities),
+        )
+
+        def fake_run(command, **kwargs):
+            assert command[-1] == "--version"
+            return SimpleNamespace(stdout="0.1.3\n")
+
+        monkeypatch.setattr(checkpoint_driver.subprocess, "run", fake_run)
+
+        result = checkpoint_driver._get_scb_check_metrics(tmp_path)
+
+        assert result["scb_check"]["status"] == "failed"
+        assert result["scb_check"]["error"]["phase"] == (
+            "verify_evaluator_inputs"
+        )
+        assert "evaluator project changed" in result["scb_check"]["error"][
+            "message"
+        ]
+
+    def test_evaluator_mutation_of_capture_fails_and_preserves_source(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        snapshot = tmp_path / "snapshot"
+        snapshot.mkdir()
+        source = snapshot / "answer.py"
+        source.write_text("original\n", encoding="utf-8")
+
+        def fake_run(command, **kwargs):
+            if command[-1] == "--version":
+                return SimpleNamespace(stdout="0.1.3\n")
+            captured_file = Path(command[-1]) / "answer.py"
+            captured_file.write_text("mutated\n", encoding="utf-8")
+            return SimpleNamespace(
+                stdout=json.dumps({"verbosity": 0.5, "erosion": 0.2})
+            )
+
+        monkeypatch.setattr(checkpoint_driver.subprocess, "run", fake_run)
+
+        result = checkpoint_driver._get_scb_check_metrics(tmp_path)
+
+        assert result["scb_check"]["status"] == "failed"
+        assert result["scb_check"]["error"]["phase"] == (
+            "verify_captured_snapshot"
+        )
+        assert source.read_text(encoding="utf-8") == "original\n"
+
+    def test_snapshot_hash_framing_prevents_content_path_collision(
+        self, tmp_path: Path
+    ):
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        first.mkdir()
+        second.mkdir()
+        (first / "a").write_bytes(b"X")
+        (first / "yz").write_bytes(b"D")
+        (second / "a").write_bytes(b"Xy")
+        (second / "z").write_bytes(b"D")
+
+        assert checkpoint_driver._snapshot_tree_sha256(
+            first
+        ) != checkpoint_driver._snapshot_tree_sha256(second)
+
+    def test_snapshot_hash_binds_file_mode(self, tmp_path: Path) -> None:
+        snapshot = tmp_path / "snapshot"
+        snapshot.mkdir()
+        script = snapshot / "run.sh"
+        script.write_text("#!/bin/sh\n", encoding="utf-8")
+        script.chmod(0o644)
+        regular_hash = checkpoint_driver._snapshot_tree_sha256(snapshot)
+
+        script.chmod(0o755)
+
+        assert checkpoint_driver._snapshot_tree_sha256(snapshot) != regular_hash
+
+    def test_snapshot_hash_rejects_excess_entries(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        snapshot = tmp_path / "snapshot"
+        snapshot.mkdir()
+        (snapshot / "one.py").write_text("one", encoding="utf-8")
+        (snapshot / "two.py").write_text("two", encoding="utf-8")
+        monkeypatch.setattr(
+            checkpoint_driver,
+            "SCB_CHECK_SNAPSHOT_MAX_ENTRIES",
+            1,
+        )
+
+        with pytest.raises(ValueError, match="entry limit"):
+            checkpoint_driver._snapshot_tree_sha256(snapshot)
+
+    def test_snapshot_hash_rejects_excess_bytes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        snapshot = tmp_path / "snapshot"
+        snapshot.mkdir()
+        (snapshot / "large.py").write_bytes(b"1234")
+        monkeypatch.setattr(
+            checkpoint_driver,
+            "SCB_CHECK_SNAPSHOT_MAX_BYTES",
+            3,
+        )
+
+        with pytest.raises(ValueError, match="byte limit"):
+            checkpoint_driver._snapshot_tree_sha256(snapshot)
+
+    @pytest.mark.parametrize(
+        "value",
+        [float("nan"), float("inf"), -float("inf"), 10**1000],
+    )
+    def test_scb_check_rejects_non_finite_scores(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        value: int | float,
+    ):
+        (tmp_path / "snapshot").mkdir()
+
+        def fake_run(command, **kwargs):
+            if command[-1] == "--version":
+                return SimpleNamespace(stdout="0.1.3\n")
+            return SimpleNamespace(
+                stdout=json.dumps({"verbosity": value, "erosion": 0.2})
+            )
+
+        monkeypatch.setattr(checkpoint_driver.subprocess, "run", fake_run)
+
+        result = checkpoint_driver._get_scb_check_metrics(tmp_path)
+
+        assert "verbosity" not in result
+        assert "erosion" not in result
+        assert result["scb_check"]["status"] == "failed"
+        record_path = (
+            tmp_path / QUALITY_DIR / checkpoint_driver.SCB_CHECK_RECORD_FILENAME
+        )
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+        assert record["status"] == "failed"
+        assert record["report"] is None
+
+    @pytest.mark.parametrize(
+        "report, message",
+        [
+            ({"verbosity": -0.1, "erosion": 0.2}, "between 0 and 1"),
+            ({"verbosity": 0.1, "erosion": 1.1}, "between 0 and 1"),
+            (
+                {"verbosity": 0.1, "erosion": 0.2, "clone_loc": -1},
+                "non-negative integer",
+            ),
+            (
+                {"verbosity": 0.1, "erosion": 0.2, "total_loc": 1.5},
+                "non-negative integer",
+            ),
+            (
+                {
+                    "verbosity": 0.1,
+                    "erosion": 0.2,
+                    "clone_loc": 2,
+                    "total_loc": 1,
+                },
+                "cannot exceed",
+            ),
+        ],
+    )
+    def test_scb_check_rejects_out_of_domain_metrics(
+        self, report: dict, message: str
+    ):
+        with pytest.raises(ValueError, match=message):
+            checkpoint_driver._scb_check_metrics_from_report(report)
+
+    def test_scb_check_record_json_rejects_non_finite_values(
+        self, tmp_path: Path
+    ):
+        with pytest.raises(ValueError, match="JSON compliant"):
+            checkpoint_driver._write_scb_check_record(
+                tmp_path,
+                {"status": "measured"},
+                {"unknown_metric": float("nan")},
+            )
+
+    def test_scb_check_error_output_is_redacted_and_truncated(self):
+        credential_like_value = "sk-very-secret-value"
+        exc = checkpoint_driver.subprocess.CalledProcessError(
+            returncode=2,
+            cmd=["scb-check"],
+            stderr=credential_like_value + "\n" + ("x" * 20_000),
+        )
+
+        error = checkpoint_driver._error_record(exc, phase="test")
+
+        assert credential_like_value not in error["stderr"]
+        assert "<redacted>" in error["stderr"]
+        assert "<truncated " in error["stderr"]
+        assert len(error["stderr"]) < 9_000
+
+    def test_scb_check_rejects_snapshot_symlink_before_evaluation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        snapshot = tmp_path / "snapshot"
+        snapshot.mkdir()
+        host_file = tmp_path / "host-secret.txt"
+        host_file.write_text("must not be read", encoding="utf-8")
+        (snapshot / "escape.py").symlink_to(host_file)
+
+        def unexpected_run(*args, **kwargs):
+            pytest.fail("scb-check must not run for a symlinked snapshot")
+
+        monkeypatch.setattr(
+            checkpoint_driver.subprocess,
+            "run",
+            unexpected_run,
+        )
+
+        result = checkpoint_driver._get_scb_check_metrics(tmp_path)
+
+        assert result["scb_check"]["status"] == "failed"
+        assert result["scb_check"]["error"]["phase"] == "capture_snapshot"
+        assert "unsupported symlink" in result["scb_check"]["error"]["message"]
+
+    def test_evaluator_failure_output_is_bounded_at_collection(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        credential_like_value = "sk-very-secret-value"
+
+        def fake_run(command, **kwargs):
+            assert "capture_output" not in kwargs
+            kwargs["stderr"].write(
+                (credential_like_value + "\n" + ("x" * 100_000)).encode()
+            )
+            return SimpleNamespace(returncode=2)
+
+        monkeypatch.setattr(checkpoint_driver.subprocess, "run", fake_run)
+
+        with pytest.raises(
+            checkpoint_driver.subprocess.CalledProcessError
+        ) as raised:
+            checkpoint_driver._run_captured_command(
+                ["scb-check"],
+                timeout=30,
+                stdout_limit=checkpoint_driver.SCB_CHECK_REPORT_STREAM_LIMIT,
+            )
+
+        error = checkpoint_driver._error_record(
+            raised.value,
+            phase="test",
+        )
+        assert credential_like_value not in error["stderr"]
+        assert "<redacted>" in error["stderr"]
+        assert len(error["stderr"]) < 9_000
 
 
 class TestComputeCheckpointDelta:

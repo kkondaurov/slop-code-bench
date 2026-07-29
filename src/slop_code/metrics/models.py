@@ -770,6 +770,22 @@ class RatiosStats(BaseModel):
     violation_pct: MetricStats = Field(default_factory=MetricStats)
 
 
+class ScbCheckCoverage(BaseModel):
+    """Coverage and version evidence for run-level quality measurement."""
+
+    evaluator: str = "scb-check"
+    requested_version: str = "0.1.3"
+    resolved_versions: list[str] = Field(default_factory=list)
+    measured_checkpoints: int = 0
+    expected_checkpoints: int = 0
+    failed_checkpoints: int = 0
+    missing_snapshot_checkpoints: int = 0
+    missing_metadata_checkpoints: int = 0
+    missing_checkpoint_records: int = 0
+    unmeasured_checkpoints: int = 0
+    coverage_pct: float = 0.0
+
+
 class RunSummary(BaseModel):
     """Complete summary statistics for a run."""
 
@@ -781,6 +797,11 @@ class RunSummary(BaseModel):
 
     # Counts
     num_problems: int
+    # Total problems the run was configured to attempt. ``num_problems`` is
+    # the number represented by produced checkpoint records; this configured
+    # count is the denominator for problem-level solve rates so a problem that
+    # crashes before producing a record cannot disappear from the benchmark.
+    expected_problems: int
     num_checkpoints: int
     # Total checkpoints the run was configured to attempt (sum of
     # checkpoint counts across the problem list). Used as the
@@ -826,3 +847,6 @@ class RunSummary(BaseModel):
     # Composite quality scores
     verbosity: MetricStats = Field(default_factory=MetricStats)
     erosion: MetricStats = Field(default_factory=MetricStats)
+
+    # Versioned composite-quality measurement coverage
+    scb_check: ScbCheckCoverage = Field(default_factory=ScbCheckCoverage)

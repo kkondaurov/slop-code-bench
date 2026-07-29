@@ -1,0 +1,188 @@
+schema_version: 1
+id: scbench-v2
+
+paper:
+  arxiv_id: "2603.24755"
+  version: v2
+  url: https://arxiv.org/html/2603.24755v2
+
+runner:
+  repository: https://github.com/kkondaurov/slop-code-bench
+  upstream_repository: https://github.com/SprocketLab/slop-code-bench
+  base_commit: 13de1a7a6b8b3dc5cc532a0c322a0997afa5bec7
+  release_tag: scbench-v2-repro.1
+  release_url: https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2-repro.1
+  selection: >-
+    Current upstream base selected for the reproducible fork. It includes
+    post-paper correctness fixes and is therefore not claimed to be the
+    unpublished byte-exact runner used to produce the paper table.
+
+catalog:
+  repository: https://github.com/gabeorlanski/scb-problems
+  release: v1.0
+  commit: 4d38d300059667d57e43c31969bc455f5c338b52
+  problem_count: 36
+  checkpoint_count: 196
+  content_lock: configs/scbench-v2/content-lock.json
+  content_lock_schema_version: 2
+  content_lock_sha256: 44053279981dca44397c4e174809d0f199d56706ed51983ba6020315cd09969a
+  hash_algorithm: sha256-length-prefixed-mode-v2
+  note: >-
+    The problem repository calls this release v1.0. It is the catalog used by
+    the v2 revision of arXiv:2603.24755; the two version labels describe
+    different artifacts and are not contradictory.
+
+protocol:
+  environment: docker-python3.12-uv-scb-v2
+  environment_sha256: 1168bd4dbaec9d54c04f1e1606711bec22c46d0d8493dcb47b381a646de39910
+  source_image:
+    reference: ghcr.io/astral-sh/uv:python3.12-trixie-slim
+    pinned: ghcr.io/astral-sh/uv@sha256:519357e414a4240af8b3ac657466c20f9d6041b5a3ce999d96fa9d576ef7fd29
+    digest: sha256:519357e414a4240af8b3ac657466c20f9d6041b5a3ce999d96fa9d576ef7fd29
+    role: immutable parent input to the base-image setup recipe
+  prebuilt_base:
+    reference: sha256:d2b862aad2bf40fe80573d0facc462608ce2a2fe76b56927a36050dc02a44f14
+    image_id: sha256:d2b862aad2bf40fe80573d0facc462608ce2a2fe76b56927a36050dc02a44f14
+    platform: linux/arm64
+    architecture: arm64
+    image_size_bytes: 1126378457
+    bundled_tools:
+      minio:
+        release: RELEASE.2025-09-07T16-13-09Z
+        architecture: arm64
+        sha256: 5c83cd2cf151717ba0243f73e1c7802ff36e272b67144bdd7f1f7d684fd6f03d
+        runtime: linux/arm64
+    archive:
+      path: outputs/reproducibility-images/slopcodebench-base-scb-v2-linux-arm64-image-d2b862aad2bf.tar.zst
+      checksum_file: configs/scbench-v2/release-assets.sha256
+      download_url: https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2-repro.1/slopcodebench-base-scb-v2-linux-arm64-image-d2b862aad2bf.tar.zst
+      checksum_url: https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2-repro.1/release-assets.sha256
+      size_bytes: 1097630979
+      sha256: dff52ff24d1d7e7d88525ef403b374d6464d3331c2b3df1ce72e4d56a3ec5df9
+      compression: zstd
+      integrity_check: clean
+      loader: scripts/load_scbench_v2_base.sh
+    publication_status: published
+    note: >-
+      This is the fully built Docker image after applying the environment
+      setup recipe, not the upstream parent manifest digest. The verified
+      archive is published with the scbench-v2-repro.1 GitHub release.
+  prompt: just-solve
+  prompt_sha256: 663d8920c1f88f30f9fc51ff47328a083a61fd13e6db082a9707613a6aa725e3
+  seed: 42
+  evaluate: true
+  num_workers: 2
+  concurrent_evaluation: false
+  providers_config: configs/providers.yaml
+  providers_config_sha256: 400e5fce45d818eb6ba63f02facad35560c81d34c51a2f8ab0c3005b6887c65b
+  one_shot: false
+  pass_policy: any-case
+  pass_policy_purpose: continue the trajectory after a failed checkpoint
+  timeout_seconds_per_checkpoint: 7200
+  cost_limit_usd: 0
+  step_limit: 0
+  net_cost_limit_usd: 0
+
+quality_evaluator:
+  primary:
+    package: scb-check==0.1.3
+    project: configs/scbench-v2/evaluator/pyproject.toml
+    project_sha256: 9fd6ec5dbf0618f8898b53c486f2226e0273c749d8fc63974be064d758884bbf
+    lock: configs/scbench-v2/evaluator/uv.lock
+    lock_sha256: ab3468dab9861ad936d173fd883eb7c44d979117e591ae8f3fbe010ecf925709
+    command: >-
+      UV_NO_CONFIG=1 uv run --frozen
+      --project configs/scbench-v2/evaluator scb-check
+    role: paper-era primary
+    rationale: >-
+      The package is pinned so a mutable bare uvx invocation cannot change
+      headline quality metrics between runs.
+    uncertainty: >-
+      The paper did not disclose an exact scb-check version. Version 0.1.3 is
+      a documented reconstruction choice, not a published paper fact.
+    artifacts:
+      - per-checkpoint quality result and status
+      - evaluated snapshot tree hash
+      - measured checkpoint count versus expected checkpoint count
+  sensitivity:
+    package: scb-check==0.2.0
+    role: posthoc sensitivity only
+    policy: >-
+      Run only against preserved snapshots. Keep the output separately labeled
+      and never overwrite primary artifacts or headline metrics.
+
+profiles:
+  paper-v2-reference:
+    classification: reference-aligned diagnostic
+    config: configs/runs/paper-v2-reference.yaml
+    diagnostic_config: configs/runs/paper-v2-reference-diagnostic.yaml
+    model: gpt-5.5
+    provider: codex_auth
+    harness: Codex CLI
+    agent_type: codex
+    agent_config: configs/agents/codex-0.124.0.yaml
+    agent_config_sha256: 9f4b52d3d9d46cbcb70968b83fdb1f29455c4c4702bc53b850fe4fc21b6b59ab
+    model_config: configs/models/gpt-5.5.yaml
+    model_config_sha256: ffabc9f7a9062d1768ca8f346932128ce677007ac0a563158f39c85cea38652f
+    cli_version: 0.124.0
+    reasoning: high
+    release_evidence:
+      registry: https://registry.npmjs.org/@openai%2Fcodex/0.124.0
+      package_integrity: >-
+        sha512-1EVAuPyAQZ8zIVMw3bPJ6a4R8ifLAZ7LGsOyknj5c2he9AFXVRCmWx12WrdZJ25wcBvOEKt1n1Zx+QAj0EVGbQ==
+      platform_alias_targets:
+        linux_arm64: "@openai/codex@0.124.0-linux-arm64"
+        linux_x64: "@openai/codex@0.124.0-linux-x64"
+      platform_integrity:
+        linux_arm64: >-
+          sha512-QXafFVQJxPfU1LSCI5afuHsF5evKAcbQpFuKou0Kl241/HG/zYHdwoWj546zH844gJgegIPAxPf36+RSkUsbbA==
+        linux_x64: >-
+          sha512-cJ4QfQIrz2gkXVWephiGo9JDyD3qLKhvkTTLk7gI8rKd7MZpVXn9/1e7pZCQnJVA7Dk6ocA5G+sxnR78SoIejw==
+    semantics: >-
+      Matches the paper's published GPT-5.5 model, CLI version, prompt, and
+      reasoning setting. The selected runner contains documented post-paper
+      fixes, so results are a reference-aligned replication, not a byte-exact
+      recreation of an unpublished runner environment.
+  gpt-5.5-current-xhigh:
+    classification: extension experiment
+    config: configs/runs/gpt-5.5-current-xhigh.yaml
+    diagnostic_config: configs/runs/gpt-5.5-current-xhigh-diagnostic.yaml
+    model: gpt-5.5
+    provider: codex_auth
+    harness: Codex CLI
+    agent_type: codex
+    agent_config: configs/agents/codex-0.146.0.yaml
+    agent_config_sha256: c7c70d079f37ccc74e7bbb1010a8afd937a6a8a70c96f43d1acd045481df7a94
+    model_config: configs/models/gpt-5.5.yaml
+    model_config_sha256: ffabc9f7a9062d1768ca8f346932128ce677007ac0a563158f39c85cea38652f
+    cli_version: 0.146.0
+    reasoning: xhigh
+    release_evidence:
+      registry: https://registry.npmjs.org/@openai%2Fcodex/0.146.0
+      checked_at: 2026-07-29T11:24:57Z
+      published_at: 2026-07-29T01:42:51Z
+      prerelease: false
+      package_integrity: >-
+        sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==
+      platform_alias_targets:
+        linux_arm64: "@openai/codex@0.146.0-linux-arm64"
+        linux_x64: "@openai/codex@0.146.0-linux-x64"
+      platform_integrity:
+        linux_arm64: >-
+          sha512-qiYDxkkEFnXG7joadJW6Q+XcgyDXCpGdpa9nk/c+i0gEomur1j7bHvx12NfWWCF/y8Tqri6ay+FLuC2MjdehtA==
+        linux_x64: >-
+          sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==
+    semantics: >-
+      Measures a newer Codex harness and a larger reasoning budget on the
+      frozen v2 catalog. It must not be presented as a reproduction of the
+      paper's GPT-5.5 row.
+
+diagnostic_subset:
+  problems:
+    mvvault: 6
+    xjq: 5
+  checkpoint_count: 11
+  gate: >-
+    Inspect trajectories, tool availability, authentication, Docker
+    isolation, evaluator behavior, metric coverage, and telemetry before any
+    196-checkpoint extension run.

@@ -31,6 +31,7 @@ from slop_code.common.llms import APIPricing
 from slop_code.common.llms import ModelDefinition
 from slop_code.common.llms import ThinkingPreset
 from slop_code.common.llms import TokenUsage
+from slop_code.common.temp import temporary_directory
 from slop_code.execution import DockerEnvironmentSpec
 from slop_code.execution import EnvironmentSpec
 from slop_code.execution import Session
@@ -206,6 +207,7 @@ class ClaudeCodeAgent(Agent):
         self._foundry = foundry
         self._session: Session | None = None
         self._environment: EnvironmentSpec | None = None
+        self._workspace: Path | None = None
         self._runtime: StreamingRuntime | None = None
 
         # Temporary directory for storing artifacts of agent execution
@@ -669,7 +671,7 @@ class ClaudeCodeAgent(Agent):
         self._session = session
         self._environment = session.spec
         self._workspace = session.working_dir
-        self._tmp_dir = tempfile.TemporaryDirectory()
+        self._tmp_dir = temporary_directory()
         self._saved_trace_paths = set()
         volumes: dict[str, dict[str, str] | str] = {}
         if isinstance(session.spec, DockerEnvironmentSpec):
@@ -926,6 +928,9 @@ class ClaudeCodeAgent(Agent):
         self._last_steps = []
         self._last_prompt = ""
         self._last_command = None
+        self.steps = []
+        self.final_result = None
+        self._had_error = False
         self._got_successful_result = False
 
     def save_artifacts(self, path: Path) -> None:
@@ -969,7 +974,17 @@ class ClaudeCodeAgent(Agent):
         )
 
     def cleanup(self) -> None:
+        if self._runtime is not None:
+            self._runtime.cleanup()
+            self._runtime = None
+        if self._tmp_dir is not None:
+            self._tmp_dir.cleanup()
+            self._tmp_dir = None
         self._session = None
+        self._environment = None
+        self._workspace = None
+        self._trace_dir = None
+        self._settings_path = None
         self._saved_trace_paths = set()
         self.log.debug("agent.claude_code.cleanup")
 

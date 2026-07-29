@@ -35,22 +35,26 @@ def build_agent_docker(
 ) -> str:
     agent_image_name = f"{docker_runtime.IMAGE_NAME_PREFIX}:{agent_config.get_image(environment.name)}"
     client = docker.from_env()
-    docker_runtime.build_base_image(
-        client=client,
-        environment_spec=environment,
-        force_build=force_build_base,
-    )
-    docker_file = agent_config.get_docker_file(environment.get_base_image())
-    if docker_file is None:
-        raise ValueError("Docker file is None")
-    client = docker.from_env()
-    _ = docker_runtime.build_image_from_str(
-        client=client,
-        image_name=agent_image_name,
-        dockerfile=docker_file,
-        force_build=force_build,
-    )
-    client.close()
+    try:
+        base_image = docker_runtime.build_base_image(
+            client=client,
+            environment_spec=environment,
+            force_build=force_build_base,
+        )
+        docker_file = agent_config.get_docker_file(
+            environment.get_base_image()
+        )
+        if docker_file is None:
+            raise ValueError("Docker file is None")
+        _ = docker_runtime.build_image_from_str(
+            client=client,
+            image_name=agent_image_name,
+            dockerfile=docker_file,
+            force_build=force_build,
+            parent_image_id=base_image.id,
+        )
+    finally:
+        client.close()
     return agent_image_name
 
 

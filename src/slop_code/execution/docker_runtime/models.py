@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import os
 import platform
+import re
 from typing import Literal
 
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import model_validator
 
 from slop_code.execution.models import EnvironmentSpec
 from slop_code.logging import get_logger
@@ -14,6 +16,7 @@ from slop_code.logging import get_logger
 logger = get_logger(__name__)
 
 IMAGE_NAME_PREFIX = "slop-code"
+SHA256_IMAGE_ID_PATTERN = re.compile(r"sha256:[0-9a-f]{64}\Z")
 
 
 class DockerConfig(BaseModel):
@@ -59,6 +62,58 @@ class DockerConfig(BaseModel):
         default=None,
         description="User specifier for docker run (e.g. '1000:1000').",
     )
+    prebuilt_image: str | None = Field(
+        default=None,
+        description=(
+            "Immutable prebuilt image ID or registry digest to use directly "
+            "instead of executing the base-image setup recipe."
+        ),
+    )
+    expected_image_id: str | None = Field(
+        default=None,
+        description=(
+            "Exact Docker image ID required for the resolved prebuilt image."
+        ),
+    )
+    expected_architecture: Literal["amd64", "arm64"] | None = Field(
+        default=None,
+        description=(
+            "Architecture required for the resolved prebuilt image."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def validate_prebuilt_image_lock(self) -> DockerConfig:
+        """Require a complete, immutable lock for direct prebuilt images."""
+        values = (
+            self.prebuilt_image,
+            self.expected_image_id,
+            self.expected_architecture,
+        )
+        if all(value is None for value in values):
+            return self
+        if any(value is None for value in values):
+            raise ValueError(
+                "prebuilt_image, expected_image_id, and "
+                "expected_architecture must be configured together"
+            )
+        reference = self.prebuilt_image
+        expected_id = self.expected_image_id
+        if reference is None or expected_id is None:
+            raise ValueError("Prebuilt image lock is incomplete")
+        if SHA256_IMAGE_ID_PATTERN.fullmatch(expected_id) is None:
+            raise ValueError(
+                "expected_image_id must be a lowercase sha256 Docker image ID"
+            )
+        if (
+            SHA256_IMAGE_ID_PATTERN.fullmatch(reference) is None
+            and "@sha256:" not in reference
+        ):
+            raise ValueError(
+                "prebuilt_image must be a sha256 image ID or an immutable "
+                "registry digest reference"
+            )
+        return self
 
 
 class DockerEnvironmentSpec(EnvironmentSpec):

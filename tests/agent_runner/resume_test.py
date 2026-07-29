@@ -3,23 +3,59 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime
 from pathlib import Path
 
+import pytest
 import yaml
 
 from slop_code.agent_runner.models import UsageTracker
 from slop_code.agent_runner.reporting import CheckpointState
 from slop_code.agent_runner.reporting import MetricsTracker
+from slop_code.agent_runner.resume import InvalidationReason
 from slop_code.agent_runner.resume import ResumeInfo
 from slop_code.agent_runner.resume import _aggregate_prior_usage
 from slop_code.agent_runner.resume import _detect_resume_from_artifacts
+from slop_code.agent_runner.resume import _evaluation_status
 from slop_code.agent_runner.resume import detect_resume_point
 from slop_code.common import INFERENCE_RESULT_FILENAME
 from slop_code.common import RUN_INFO_FILENAME
 from slop_code.common import SNAPSHOT_DIR_NAME
 from slop_code.common.llms import TokenUsage
+from slop_code.evaluation.report import CorrectnessResults
+from slop_code.evaluation.report import PassPolicy
 from slop_code.execution.models import SetupConfig
+
+
+def _inference_result(
+    *,
+    cost: float = 0.0,
+    steps: int = 0,
+    net_tokens: dict[str, int] | None = None,
+    had_error: bool = False,
+) -> dict[str, object]:
+    now = datetime.now().isoformat()
+    tokens = {
+        "input": 0,
+        "output": 0,
+        "cache_read": 0,
+        "cache_write": 0,
+        "reasoning": 0,
+    }
+    tokens.update(net_tokens or {})
+    return {
+        "started": now,
+        "completed": now,
+        "elapsed": 0.0,
+        "had_error": had_error,
+        "usage": {
+            "cost": cost,
+            "steps": steps,
+            "net_tokens": tokens,
+            "current_tokens": dict(tokens),
+        },
+    }
 
 
 class TestSetupConfigResumeCommands:
@@ -104,9 +140,13 @@ class TestDetectResumePoint:
         with (tmp_path / RUN_INFO_FILENAME).open("w") as f:
             yaml.dump(run_info, f)
 
-        # Create snapshot directories
-        (tmp_path / "checkpoint_1" / SNAPSHOT_DIR_NAME).mkdir(parents=True)
-        (tmp_path / "checkpoint_2" / SNAPSHOT_DIR_NAME).mkdir(parents=True)
+        # Create solve-complete artifacts, not only optimistic run_info state.
+        for checkpoint_name in ("checkpoint_1", "checkpoint_2"):
+            checkpoint_dir = tmp_path / checkpoint_name
+            (checkpoint_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
+            (checkpoint_dir / INFERENCE_RESULT_FILENAME).write_text(
+                json.dumps(_inference_result())
+            )
 
         result = detect_resume_point(tmp_path, ["checkpoint_1", "checkpoint_2"])
         assert result is not None
@@ -157,9 +197,11 @@ class TestDetectResumePoint:
         # Create checkpoint_1 snapshot and inference result
         checkpoint_1_dir = tmp_path / "checkpoint_1"
         (checkpoint_1_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
-        inference_result = {
-            "usage": {"cost": 0.5, "steps": 5, "net_tokens": {"input": 100}}
-        }
+        inference_result = _inference_result(
+            cost=0.5,
+            steps=5,
+            net_tokens={"input": 100},
+        )
         with (checkpoint_1_dir / INFERENCE_RESULT_FILENAME).open("w") as f:
             json.dump(inference_result, f)
 
@@ -194,7 +236,7 @@ class TestDetectResumePoint:
         for i, cost in [(1, 0.5), (2, 0.8)]:
             checkpoint_dir = tmp_path / f"checkpoint_{i}"
             (checkpoint_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
-            inference_result = {"usage": {"cost": cost, "steps": i * 5}}
+            inference_result = _inference_result(cost=cost, steps=i * 5)
             with (checkpoint_dir / INFERENCE_RESULT_FILENAME).open("w") as f:
                 json.dump(inference_result, f)
 
@@ -213,6 +255,74 @@ class TestDetectResumePoint:
         assert result.prior_usage.cost == 1.3
         assert result.prior_usage.steps == 15
 
+    def test_complete_artifact_supersedes_newer_stale_skipped_run_info(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        """A hard kill after inference must not cause duplicate model spend."""
+        now = datetime.now()
+        run_info_path = tmp_path / RUN_INFO_FILENAME
+        run_info_path.write_text(
+            yaml.safe_dump(
+                {
+                    "summary": {
+                        "started": now.isoformat(),
+                        "ended": now.isoformat(),
+                        "duration_seconds": 0.0,
+                        "total_cost": 0.0,
+                        "total_steps": 0,
+                        "total_usage": UsageTracker().model_dump(),
+                        "checkpoints": {
+                            "checkpoint_1": CheckpointState.RAN,
+                            "checkpoint_2": CheckpointState.SKIPPED,
+                        },
+                        "state": "error",
+                        "passed_policy": False,
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        for index, cost in ((1, 1.0), (2, 2.0)):
+            checkpoint_dir = tmp_path / f"checkpoint_{index}"
+            (checkpoint_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
+            (checkpoint_dir / INFERENCE_RESULT_FILENAME).write_text(
+                json.dumps(
+                    _inference_result(
+                        cost=cost,
+                        steps=index,
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+        newest_artifact_mtime = max(
+            (tmp_path / f"checkpoint_{index}" / INFERENCE_RESULT_FILENAME)
+            .stat()
+            .st_mtime_ns
+            for index in (1, 2)
+        )
+        stale_metadata_mtime = newest_artifact_mtime + 1_000_000_000
+        os.utime(
+            run_info_path,
+            ns=(stale_metadata_mtime, stale_metadata_mtime),
+        )
+
+        result = detect_resume_point(
+            tmp_path,
+            ["checkpoint_1", "checkpoint_2"],
+        )
+
+        assert result is not None
+        assert result.resume_from_checkpoint == ""
+        assert result.completed_checkpoints == [
+            "checkpoint_1",
+            "checkpoint_2",
+        ]
+        assert result.invalidated_checkpoints == []
+        assert result.prior_usage.cost == 3.0
+        assert result.run_info_reconciliation_required is True
+
     def test_handles_missing_snapshot_directory(self, tmp_path: Path) -> None:
         """Checkpoint with missing snapshot is not considered complete."""
         run_info = {
@@ -228,7 +338,7 @@ class TestDetectResumePoint:
 
         # Only create snapshot for checkpoint_1, not checkpoint_2
         (tmp_path / "checkpoint_1" / SNAPSHOT_DIR_NAME).mkdir(parents=True)
-        inference_result = {"usage": {"cost": 0.5, "steps": 5}}
+        inference_result = _inference_result(cost=0.5, steps=5)
         with (tmp_path / "checkpoint_1" / INFERENCE_RESULT_FILENAME).open(
             "w"
         ) as f:
@@ -242,12 +352,214 @@ class TestDetectResumePoint:
         assert result.completed_checkpoints == ["checkpoint_1"]
 
     def test_handles_invalid_yaml(self, tmp_path: Path) -> None:
-        """Returns None when run_info.yaml is invalid."""
+        """Invalid metadata falls back to artifacts instead of starting fresh."""
         with (tmp_path / RUN_INFO_FILENAME).open("w") as f:
             f.write("invalid: yaml: content: {{{{")
 
         result = detect_resume_point(tmp_path, ["checkpoint_1"])
-        assert result is None
+        assert result is not None
+        assert result.resume_from_checkpoint == "checkpoint_1"
+        assert result.invalidated_checkpoints == ["checkpoint_1"]
+
+    def test_invalid_yaml_uses_completed_checkpoint_artifacts(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / RUN_INFO_FILENAME).write_text(
+            "summary: [truncated",
+            encoding="utf-8",
+        )
+        checkpoint_dir = tmp_path / "checkpoint_1"
+        (checkpoint_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
+        (checkpoint_dir / INFERENCE_RESULT_FILENAME).write_text(
+            json.dumps(_inference_result()),
+            encoding="utf-8",
+        )
+
+        result = detect_resume_point(
+            tmp_path,
+            ["checkpoint_1", "checkpoint_2"],
+        )
+
+        assert result is not None
+        assert result.completed_checkpoints == ["checkpoint_1"]
+        assert result.resume_from_checkpoint == "checkpoint_2"
+
+    def test_non_object_inference_result_is_invalid_not_an_exception(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / RUN_INFO_FILENAME).write_text(
+            yaml.safe_dump(
+                {"summary": {"checkpoints": {"checkpoint_1": "ran"}}}
+            ),
+            encoding="utf-8",
+        )
+        checkpoint_dir = tmp_path / "checkpoint_1"
+        (checkpoint_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
+        (checkpoint_dir / INFERENCE_RESULT_FILENAME).write_text(
+            "[]",
+            encoding="utf-8",
+        )
+
+        result = detect_resume_point(tmp_path, ["checkpoint_1"])
+
+        assert result is not None
+        assert result.completed_checkpoints == []
+        assert result.resume_from_checkpoint == "checkpoint_1"
+
+    @pytest.mark.parametrize(
+        "mutation",
+        (
+            lambda result: result.pop("elapsed"),
+            lambda result: result["usage"].update({"cost": -1.0}),
+            lambda result: result.update(
+                {
+                    "started": "2026-01-02T00:00:00",
+                    "completed": "2026-01-01T00:00:00",
+                }
+            ),
+            lambda result: result.update(
+                {
+                    "started": "2026-01-01T00:00:00",
+                    "completed": "2026-01-01T00:00:00+00:00",
+                }
+            ),
+        ),
+    )
+    def test_semantically_invalid_inference_result_forces_rerun(
+        self,
+        tmp_path: Path,
+        mutation,
+    ) -> None:
+        checkpoint_dir = tmp_path / "checkpoint_1"
+        (checkpoint_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
+        payload = _inference_result()
+        mutation(payload)
+        (checkpoint_dir / INFERENCE_RESULT_FILENAME).write_text(
+            json.dumps(payload),
+            encoding="utf-8",
+        )
+
+        result = detect_resume_point(tmp_path, ["checkpoint_1"])
+
+        assert result is not None
+        assert result.completed_checkpoints == []
+        assert result.resume_from_checkpoint == "checkpoint_1"
+
+    @pytest.mark.parametrize(
+        "metadata_kind",
+        ("missing", "unreadable", "schema-invalid"),
+    )
+    def test_complete_artifacts_require_metadata_only_reconciliation(
+        self,
+        tmp_path: Path,
+        metadata_kind: str,
+    ) -> None:
+        checkpoint_dir = tmp_path / "checkpoint_1"
+        (checkpoint_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
+        (checkpoint_dir / INFERENCE_RESULT_FILENAME).write_text(
+            json.dumps(_inference_result(cost=1.0, steps=2)),
+            encoding="utf-8",
+        )
+        run_info_path = tmp_path / RUN_INFO_FILENAME
+        if metadata_kind == "unreadable":
+            run_info_path.mkdir()
+        elif metadata_kind == "schema-invalid":
+            run_info_path.write_text(
+                yaml.safe_dump({"summary": {"checkpoints": {}}}),
+                encoding="utf-8",
+            )
+
+        result = detect_resume_point(tmp_path, ["checkpoint_1"])
+
+        assert result is not None
+        assert result.resume_from_checkpoint == ""
+        assert result.completed_checkpoints == ["checkpoint_1"]
+        assert result.run_info_reconciliation_required is True
+
+    def test_complete_artifacts_supersede_semantically_stale_aggregate(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        checkpoint_dir = tmp_path / "checkpoint_1"
+        (checkpoint_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
+        actual_result = _inference_result(cost=1.0, steps=2)
+        (checkpoint_dir / INFERENCE_RESULT_FILENAME).write_text(
+            json.dumps(actual_result),
+            encoding="utf-8",
+        )
+        stale_usage = UsageTracker(cost=999.0, steps=999)
+        now = datetime.now().isoformat()
+        (tmp_path / RUN_INFO_FILENAME).write_text(
+            yaml.safe_dump(
+                {
+                    "pass_policy": PassPolicy.ANY_CASE.value,
+                    "summary": {
+                        "started": now,
+                        "ended": now,
+                        "duration_seconds": 0.0,
+                        "total_cost": stale_usage.cost,
+                        "total_steps": stale_usage.steps,
+                        "total_usage": stale_usage.model_dump(),
+                        "checkpoints": {"checkpoint_1": CheckpointState.RAN},
+                        "state": "running",
+                        "passed_policy": False,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = detect_resume_point(tmp_path, ["checkpoint_1"])
+
+        assert result is not None
+        assert result.resume_from_checkpoint == ""
+        assert result.prior_usage.cost == 1.0
+        assert result.prior_usage.steps == 2
+        assert result.run_info_reconciliation_required is True
+
+    def test_truthful_completed_run_info_needs_no_reconciliation(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        checkpoint_dir = tmp_path / "checkpoint_1"
+        (checkpoint_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
+        inference = _inference_result(
+            cost=1.0,
+            steps=2,
+            net_tokens={"input": 7, "output": 3},
+        )
+        (checkpoint_dir / INFERENCE_RESULT_FILENAME).write_text(
+            json.dumps(inference),
+            encoding="utf-8",
+        )
+        now = datetime.now().isoformat()
+        usage = inference["usage"]
+        (tmp_path / RUN_INFO_FILENAME).write_text(
+            yaml.safe_dump(
+                {
+                    "pass_policy": PassPolicy.ANY_CASE.value,
+                    "summary": {
+                        "started": now,
+                        "ended": now,
+                        "duration_seconds": 0.0,
+                        "total_cost": 1.0,
+                        "total_steps": 2,
+                        "total_usage": usage,
+                        "checkpoints": {"checkpoint_1": CheckpointState.RAN},
+                        "state": "completed",
+                        "passed_policy": True,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        result = detect_resume_point(tmp_path, ["checkpoint_1"])
+
+        assert result is not None
+        assert result.run_info_reconciliation_required is False
+        assert result.prior_usage.current_tokens.input == 7
+        assert result.prior_usage.current_tokens.output == 3
 
     def test_handles_malformed_run_info(self, tmp_path: Path) -> None:
         """Returns ResumeInfo with invalidated checkpoints when run_info structure is unexpected."""
@@ -260,6 +572,29 @@ class TestDetectResumePoint:
         assert result is not None
         assert result.resume_from_checkpoint == "checkpoint_1"
         assert result.completed_checkpoints == []
+
+    def test_missing_summary_uses_completed_checkpoint_artifacts(
+        self, tmp_path: Path
+    ) -> None:
+        (tmp_path / RUN_INFO_FILENAME).write_text(
+            yaml.safe_dump({"not_summary": {}}),
+            encoding="utf-8",
+        )
+        checkpoint_dir = tmp_path / "checkpoint_1"
+        (checkpoint_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
+        (checkpoint_dir / INFERENCE_RESULT_FILENAME).write_text(
+            json.dumps(_inference_result()),
+            encoding="utf-8",
+        )
+
+        result = detect_resume_point(
+            tmp_path,
+            ["checkpoint_1", "checkpoint_2"],
+        )
+
+        assert result is not None
+        assert result.completed_checkpoints == ["checkpoint_1"]
+        assert result.resume_from_checkpoint == "checkpoint_2"
 
 
 class TestDetectResumeFromArtifacts:
@@ -287,16 +622,15 @@ class TestDetectResumeFromArtifacts:
         checkpoint_1_dir = tmp_path / "checkpoint_1"
         (checkpoint_1_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
         with (checkpoint_1_dir / INFERENCE_RESULT_FILENAME).open("w") as f:
-            json.dump(
-                {"had_error": False, "usage": {"cost": 0.5, "steps": 5}}, f
-            )
+            json.dump(_inference_result(cost=0.5, steps=5), f)
 
         # checkpoint_2: snapshot + error (resume from here)
         checkpoint_2_dir = tmp_path / "checkpoint_2"
         (checkpoint_2_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
         with (checkpoint_2_dir / INFERENCE_RESULT_FILENAME).open("w") as f:
             json.dump(
-                {"had_error": True, "usage": {"cost": 0.3, "steps": 3}}, f
+                _inference_result(cost=0.3, steps=3, had_error=True),
+                f,
             )
 
         result = _detect_resume_from_artifacts(
@@ -318,7 +652,8 @@ class TestDetectResumeFromArtifacts:
         (checkpoint_1_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
         with (checkpoint_1_dir / INFERENCE_RESULT_FILENAME).open("w") as f:
             json.dump(
-                {"had_error": True, "usage": {"cost": 0.5, "steps": 5}}, f
+                _inference_result(cost=0.5, steps=5, had_error=True),
+                f,
             )
 
         result = _detect_resume_from_artifacts(
@@ -342,9 +677,7 @@ class TestDetectResumeFromArtifacts:
         checkpoint_1_dir = tmp_path / "checkpoint_1"
         (checkpoint_1_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
         with (checkpoint_1_dir / INFERENCE_RESULT_FILENAME).open("w") as f:
-            json.dump(
-                {"had_error": False, "usage": {"cost": 1.0, "steps": 10}}, f
-            )
+            json.dump(_inference_result(cost=1.0, steps=10), f)
 
         # checkpoint_2: no snapshot (resume from here)
         # (directory doesn't exist)
@@ -367,7 +700,7 @@ class TestDetectResumeFromArtifacts:
             checkpoint_dir = tmp_path / f"checkpoint_{i}"
             (checkpoint_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
             with (checkpoint_dir / INFERENCE_RESULT_FILENAME).open("w") as f:
-                json.dump({"had_error": False, "usage": {"cost": 0.5}}, f)
+                json.dump(_inference_result(cost=0.5), f)
 
         result = _detect_resume_from_artifacts(
             tmp_path, ["checkpoint_1", "checkpoint_2"]
@@ -385,9 +718,7 @@ class TestDetectResumeFromArtifacts:
         checkpoint_1_dir = tmp_path / "checkpoint_1"
         (checkpoint_1_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
         with (checkpoint_1_dir / INFERENCE_RESULT_FILENAME).open("w") as f:
-            json.dump(
-                {"had_error": False, "usage": {"cost": 0.5, "steps": 5}}, f
-            )
+            json.dump(_inference_result(cost=0.5, steps=5), f)
 
         # checkpoint_2: snapshot but no inference result (resume from here)
         checkpoint_2_dir = tmp_path / "checkpoint_2"
@@ -409,9 +740,7 @@ class TestDetectResumeFromArtifacts:
         checkpoint_1_dir = tmp_path / "checkpoint_1"
         (checkpoint_1_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
         with (checkpoint_1_dir / INFERENCE_RESULT_FILENAME).open("w") as f:
-            json.dump(
-                {"had_error": False, "usage": {"cost": 0.5, "steps": 5}}, f
-            )
+            json.dump(_inference_result(cost=0.5, steps=5), f)
 
         # checkpoint_2: snapshot + invalid JSON (resume from here)
         checkpoint_2_dir = tmp_path / "checkpoint_2"
@@ -437,14 +766,14 @@ class TestDetectResumeFromArtifacts:
             (checkpoint_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
             with (checkpoint_dir / INFERENCE_RESULT_FILENAME).open("w") as f:
                 json.dump(
-                    {
-                        "had_error": False,
-                        "usage": {
-                            "cost": float(i),
-                            "steps": i * 10,
-                            "net_tokens": {"input": i * 100, "output": i * 50},
+                    _inference_result(
+                        cost=float(i),
+                        steps=i * 10,
+                        net_tokens={
+                            "input": i * 100,
+                            "output": i * 50,
                         },
-                    },
+                    ),
                     f,
                 )
 
@@ -469,9 +798,7 @@ class TestDetectResumeFromArtifacts:
         checkpoint_1_dir = tmp_path / "checkpoint_1"
         (checkpoint_1_dir / SNAPSHOT_DIR_NAME).mkdir(parents=True)
         with (checkpoint_1_dir / INFERENCE_RESULT_FILENAME).open("w") as f:
-            json.dump(
-                {"had_error": False, "usage": {"cost": 1.0, "steps": 5}}, f
-            )
+            json.dump(_inference_result(cost=1.0, steps=5), f)
 
         result = detect_resume_point(tmp_path, ["checkpoint_1", "checkpoint_2"])
 
@@ -491,16 +818,14 @@ class TestAggregatePriorUsage:
         for i in range(1, 3):
             checkpoint_dir = tmp_path / f"checkpoint_{i}"
             checkpoint_dir.mkdir()
-            result = {
-                "usage": {
-                    "cost": float(i),
-                    "steps": i * 10,
-                    "net_tokens": {
-                        "input": i * 100,
-                        "output": i * 50,
-                    },
-                }
-            }
+            result = _inference_result(
+                cost=float(i),
+                steps=i * 10,
+                net_tokens={
+                    "input": i * 100,
+                    "output": i * 50,
+                },
+            )
             with (checkpoint_dir / INFERENCE_RESULT_FILENAME).open("w") as f:
                 json.dump(result, f)
 
@@ -513,47 +838,58 @@ class TestAggregatePriorUsage:
         assert usage.net_tokens.input == 300  # 100 + 200
         assert usage.net_tokens.output == 150  # 50 + 100
 
-    def test_handles_missing_inference_result(self, tmp_path: Path) -> None:
-        """Skips checkpoints without inference results."""
+    def test_rejects_missing_inference_result(self, tmp_path: Path) -> None:
+        """Completed-checkpoint accounting must never silently go partial."""
         # Only create result for checkpoint_2
         checkpoint_dir = tmp_path / "checkpoint_2"
         checkpoint_dir.mkdir()
-        result = {"usage": {"cost": 1.5, "steps": 15}}
+        result = _inference_result(cost=1.5, steps=15)
         with (checkpoint_dir / INFERENCE_RESULT_FILENAME).open("w") as f:
             json.dump(result, f)
 
-        usage = _aggregate_prior_usage(
-            tmp_path, ["checkpoint_1", "checkpoint_2"]
-        )
+        with pytest.raises(ValueError, match="no inference result"):
+            _aggregate_prior_usage(tmp_path, ["checkpoint_1", "checkpoint_2"])
 
-        assert usage.cost == 1.5
-        assert usage.steps == 15
-
-    def test_handles_invalid_json(self, tmp_path: Path) -> None:
-        """Skips checkpoints with invalid JSON."""
+    def test_rejects_invalid_json(self, tmp_path: Path) -> None:
         checkpoint_dir = tmp_path / "checkpoint_1"
         checkpoint_dir.mkdir()
         with (checkpoint_dir / INFERENCE_RESULT_FILENAME).open("w") as f:
             f.write("not valid json")
 
-        usage = _aggregate_prior_usage(tmp_path, ["checkpoint_1"])
+        with pytest.raises(ValueError, match="invalid inference result"):
+            _aggregate_prior_usage(tmp_path, ["checkpoint_1"])
 
-        assert usage.cost == 0.0
-        assert usage.steps == 0
-
-    def test_handles_missing_usage_fields(self, tmp_path: Path) -> None:
-        """Handles inference results with missing usage fields."""
+    def test_rejects_missing_usage_fields(self, tmp_path: Path) -> None:
         checkpoint_dir = tmp_path / "checkpoint_1"
         checkpoint_dir.mkdir()
         result = {"usage": {"cost": 1.0}}  # missing steps and tokens
         with (checkpoint_dir / INFERENCE_RESULT_FILENAME).open("w") as f:
             json.dump(result, f)
 
-        usage = _aggregate_prior_usage(tmp_path, ["checkpoint_1"])
+        with pytest.raises(ValueError, match="invalid inference result"):
+            _aggregate_prior_usage(tmp_path, ["checkpoint_1"])
 
-        assert usage.cost == 1.0
-        assert usage.steps == 0
-        assert usage.net_tokens.input == 0
+
+def test_evaluation_status_rejects_infrastructure_failure(
+    tmp_path: Path,
+) -> None:
+    report = CorrectnessResults(
+        problem_name="prob",
+        problem_version=1,
+        checkpoint_name="checkpoint_1",
+        checkpoint_version=1,
+        duration=0.01,
+        entrypoint="python main.py",
+        pytest_exit_code=3,
+        pytest_collected=0,
+        infrastructure_failure=True,
+    )
+    report.save(tmp_path)
+
+    valid, reason = _evaluation_status(tmp_path)
+
+    assert valid is False
+    assert reason == InvalidationReason.EVALUATION_ERROR
 
 
 class TestMetricsTrackerOnResume:

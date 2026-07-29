@@ -313,6 +313,7 @@ def _resolve_save_template(
 def _get_default_config() -> dict[str, Any]:
     """Get the default configuration as a dict."""
     return {
+        "profile": None,
         "agent": "claude_code",
         "environment": "docker-python3.12-uv",
         "prompt": "just-solve",
@@ -441,6 +442,12 @@ def load_run_config(
         raise ValueError("Expected config to be a dict")
 
     # 6. Resolve references and load configs
+    profile_value = cfg_dict.get("profile")
+    if profile_value is not None:
+        if not isinstance(profile_value, str) or not profile_value.strip():
+            raise ValueError("Profile must be a non-empty string")
+        profile_value = profile_value.strip()
+
     agent_path, agent_data = _resolve_agent_config(cfg_dict["agent"])
 
     # 7. Merge agent overrides into loaded agent data
@@ -542,6 +549,7 @@ def load_run_config(
     )
 
     return ResolvedRunConfig(
+        profile=profile_value,
         agent_config_path=agent_path,
         agent=agent_data,
         environment_config_path=env_path,

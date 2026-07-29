@@ -42,6 +42,7 @@ from slop_code.metrics.models import PassRatesByType
 from slop_code.metrics.models import PassRatesStats
 from slop_code.metrics.models import RatiosStats
 from slop_code.metrics.models import RunSummary
+from slop_code.metrics.models import ScbCheckCoverage
 from slop_code.metrics.models import SnapshotMetrics
 from slop_code.metrics.models import SnapshotQualityReport
 from slop_code.metrics.models import StepsStats
@@ -95,6 +96,7 @@ __all__ = [
     "PassRatesStats",
     "RatiosStats",
     "RunSummary",
+    "ScbCheckCoverage",
     "StepsStats",
     "TimeStats",
     "TokenMeans",

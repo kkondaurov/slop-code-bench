@@ -151,6 +151,7 @@ class TestLoadRunConfig:
         assert config.model.name == "sonnet-4.5"
         assert config.thinking == "none"
         assert config.pass_policy == PassPolicy.ANY
+        assert config.profile is None
         assert config.one_shot.enabled is False
         assert config.one_shot.prefix == ""
         assert config.one_shot.include_first_prefix is False
@@ -211,6 +212,21 @@ save_template: output/path
         assert config.save_template == "output/path"
         assert config.output_path == "custom/output/path"
         assert config.problems == []
+
+    def test_profile_is_preserved(self, tmp_path):
+        config_file = tmp_path / "run_config.yaml"
+        config_file.write_text("profile: paper-v2-reference\n")
+
+        config = load_run_config(config_path=config_file)
+
+        assert config.profile == "paper-v2-reference"
+
+    def test_empty_profile_is_rejected(self, tmp_path):
+        config_file = tmp_path / "run_config.yaml"
+        config_file.write_text("profile: '   '\n")
+
+        with pytest.raises(ValueError, match="non-empty string"):
+            load_run_config(config_path=config_file)
 
     def test_priority_order(self, tmp_path):
         """Test priority: CLI overrides > flags > config file > defaults."""

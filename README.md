@@ -59,6 +59,20 @@ outputs/opus-4.5/claude_code-just-solve_low_{timestamp}/
 
 **First Run:** Docker images build automatically for that _VERSION_ of the agent (5-10 minutes). Subsequent runs are faster.
 
+### Reproducible SCBench v2 experiments
+
+This fork includes frozen reference and current-model profiles for the paper's
+36-problem, 196-checkpoint SCBench v2 catalog. The profiles lock the catalog
+bytes, runner semantics, Docker image, Codex version, evaluator, and reporting
+provenance. See [SCBench v2 experiment profiles](docs/SCBENCH_V2.md) for the
+one-time setup, diagnostic gate, and full-run commands. Named profiles also
+place host temporary workspaces under the checkout so Docker VMs can mount
+them reliably. The reproducibility fork, immutable tag, and locked base-image
+asset are published in the
+[`scbench-v2-repro.1` GitHub release](https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2-repro.1);
+the image is available at its
+[deterministic release URL](https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2-repro.1/slopcodebench-base-scb-v2-linux-arm64-image-d2b862aad2bf.tar.zst).
+
 ### Troubleshooting
 
 **Docker not found:**
@@ -122,6 +136,7 @@ This is early-stage software. Your contributions will shape its direction.
 | [💡 Problem Design](docs/contributing-problems/README.md) | What makes a good evaluation problem |
 | [⚠️ Known Issues](docs/KNOWN_ISSUES.md) | Current limitations and workarounds |
 | [📊 Commands](docs/commands/README.md) | CLI command reference (run, eval, metrics, viz, etc.) |
+| [🧪 SCBench v2 experiments](docs/SCBENCH_V2.md) | Reproducible reference and current-model benchmark profiles |
 
 ## Citing Us
 

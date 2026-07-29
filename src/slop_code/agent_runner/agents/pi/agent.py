@@ -29,6 +29,7 @@ from slop_code.common.llms import APIPricing
 from slop_code.common.llms import ModelDefinition
 from slop_code.common.llms import ThinkingPreset
 from slop_code.common.llms import TokenUsage
+from slop_code.common.temp import temporary_directory
 from slop_code.execution import DockerEnvironmentSpec
 from slop_code.execution import EnvironmentSpec
 from slop_code.execution import Session
@@ -470,7 +471,7 @@ class PiAgent(Agent):
         self._session = session
         self._environment = session.spec
         self._artifact_payloads = []
-        self._tmp_dir = tempfile.TemporaryDirectory()
+        self._tmp_dir = temporary_directory()
         self._pi_auth_dir = Path(self._tmp_dir.name) / "pi-agent"
         self._pi_auth_dir.mkdir(parents=True, exist_ok=True)
         self._pi_auth_dir.chmod(0o777)

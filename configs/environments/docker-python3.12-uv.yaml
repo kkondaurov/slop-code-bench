@@ -14,9 +14,9 @@ setup:
     - uv init
     - uv add -r requirements.txt
   resume_commands:
-    # Create venv and install deps using standard Python (agent uses pip, not uv)
-    - python -m venv .venv || true
-    - .venv/bin/pip install -r requirements.txt 2>/dev/null || true
+    # Absence of dependency metadata is valid; an actual install failure is not.
+    - if [ ! -d .venv ]; then python -m venv .venv; fi
+    - if [ -f requirements.txt ]; then .venv/bin/pip install -r requirements.txt; fi
 commands:
   entry_file: "{entry_file}.py"
   command: uv run

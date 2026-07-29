@@ -17,7 +17,6 @@ from slop_code.execution import Session
 from slop_code.execution.models import CommandConfig
 from slop_code.execution.models import EnvironmentConfig
 from slop_code.execution.models import SetupConfig
-from slop_code.execution.session import Session
 
 
 class DummyAgent(Agent):
@@ -94,6 +93,32 @@ class DummyAgent(Agent):
         assert self.working_dir is not None
         for file, content in self.checkpoint_solutions[self._chkpt_num].items():
             (self.working_dir / file).write_text(content)
+        self._chkpt_num += 1
+
+
+class SnapshotFidelityAgent(DummyAgent):
+    """Agent that verifies filesystem metadata across a checkpoint boundary."""
+
+    def _write_checkpoint_solution(self) -> None:
+        assert self.working_dir is not None
+        executable = self.working_dir / "run.sh"
+        alias = self.working_dir / "run-alias"
+
+        if self._chkpt_num == 0:
+            executable.write_text("#!/bin/sh\necho carried\n", encoding="utf-8")
+            executable.chmod(0o755)
+            alias.symlink_to("run.sh")
+        else:
+            assert executable.stat().st_mode & 0o777 == 0o755
+            assert alias.is_symlink()
+            assert alias.readlink() == Path("run.sh")
+            assert alias.read_text(encoding="utf-8") == executable.read_text(
+                encoding="utf-8"
+            )
+            (self.working_dir / "carry-forward-observed.txt").write_text(
+                "executable-and-symlink-preserved\n",
+                encoding="utf-8",
+            )
         self._chkpt_num += 1
 
 
@@ -265,3 +290,46 @@ def test_checkpoint_snapshots_exclude_tar_archives(
             assert snapshot_file.exists(), (
                 f"Expected snapshot to contain {relative_path} for {checkpoint_name}"
             )
+
+
+def test_two_checkpoint_run_preserves_executable_and_symlink(
+    problem_info: tuple[ProblemConfig, list[dict[str, str]]],
+    output_dir: Path,
+    run_spec: AgentRunSpec,
+) -> None:
+    """A fresh checkpoint session restores metadata from the prior snapshot."""
+    problem, _ = problem_info
+    run_spec.problem = problem
+    run_spec.skip_evaluation = True
+    agent = SnapshotFidelityAgent(
+        checkpoint_solutions=[{}, {}],
+        num_steps=1,
+        step_tokens=1,
+        step_cost=0.0,
+        agent_name="snapshot-fidelity",
+        problem_name=problem.name,
+        cost_limits=AgentCostLimits(
+            step_limit=10,
+            cost_limit=100,
+            net_cost_limit=100,
+        ),
+        verbose=True,
+    )
+
+    result = runner.run_agent(
+        run_spec=run_spec,
+        agent=agent,
+        output_path=output_dir,
+        progress_queue=queue.Queue(),
+    )
+
+    assert result["summary"]["state"] == "completed"
+    second_snapshot = output_dir / "checkpoint_2" / "snapshot"
+    executable = second_snapshot / "run.sh"
+    alias = second_snapshot / "run-alias"
+    assert executable.stat().st_mode & 0o777 == 0o755
+    assert alias.is_symlink()
+    assert alias.readlink() == Path("run.sh")
+    assert (
+        second_snapshot / "carry-forward-observed.txt"
+    ).read_text(encoding="utf-8") == "executable-and-symlink-preserved\n"

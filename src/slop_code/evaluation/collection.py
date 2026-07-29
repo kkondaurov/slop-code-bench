@@ -18,6 +18,7 @@ from slop_code.evaluation.report import TestResult
 from slop_code.execution.assets import resolve_static_assets
 from slop_code.execution.models import EnvironmentSpec
 from slop_code.execution.session import Session
+from slop_code.execution.session import cleanup_preserving_primary
 from slop_code.logging import get_logger
 
 logger = get_logger(__name__)
@@ -247,6 +248,7 @@ def collect_checkpoint_tc(
         is_agent_infer=False,
     )
 
+    session_error: BaseException | None = None
     try:
         session.prepare()
         workspace_path = session.workspace.working_dir
@@ -296,10 +298,18 @@ def collect_checkpoint_tc(
                 pytest_args=pytest_args,
             )
             runtime = session.exec(command=cmd)
+            runtime_error: BaseException | None = None
             try:
                 result = runtime.execute(full_env, None, None)
+            except BaseException as error:  # noqa: BLE001
+                runtime_error = error
+                raise
             finally:
-                runtime.cleanup()
+                cleanup_preserving_primary(
+                    runtime.cleanup,
+                    runtime_error,
+                    phase="test collection runtime",
+                )
 
             if result.exit_code not in VALID_COLLECTION_EXIT_CODES:
                 infrastructure_failure = True
@@ -325,10 +335,18 @@ def collect_checkpoint_tc(
                     pytest_args=pytest_args,
                 )
                 runtime = session.exec(command=cmd)
+                runtime_error = None
                 try:
                     result = runtime.execute(full_env, None, None)
+                except BaseException as error:  # noqa: BLE001
+                    runtime_error = error
+                    raise
                 finally:
-                    runtime.cleanup()
+                    cleanup_preserving_primary(
+                        runtime.cleanup,
+                        runtime_error,
+                        phase="prior-test collection runtime",
+                    )
 
                 if result.exit_code not in VALID_COLLECTION_EXIT_CODES:
                     infrastructure_failure = True
@@ -388,8 +406,15 @@ def collect_checkpoint_tc(
             infrastructure_failure=infrastructure_failure,
         )
 
+    except BaseException as error:  # noqa: BLE001
+        session_error = error
+        raise
     finally:
-        session.cleanup()
+        cleanup_preserving_primary(
+            session.cleanup,
+            session_error,
+            phase="test collection session",
+        )
 
 
 def _result_nodeid(result: TestResult) -> str:

@@ -804,8 +804,10 @@ class MiniSWEAgent(Agent):
     def cleanup(self) -> None:
         """Clean up the environment resources."""
         self.log.debug("Cleaning up MiniSWE agent resources")
-        if hasattr(self.env, "cleanup"):
-            self.env.cleanup()
+        environment = self._env
+        self._env = None
+        if environment is not None and hasattr(environment, "cleanup"):
+            environment.cleanup()
         self.log.debug("Cleanup completed")
 
 

@@ -1,5 +1,6 @@
 """Tests for run_agent command helper functions."""
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock
 from unittest.mock import patch
@@ -8,21 +9,107 @@ import pytest
 import typer
 import yaml
 
+from slop_code import provenance
+from slop_code.agent_runner.models import UsageTracker
+from slop_code.agent_runner.resume import ResumeInfo
+from slop_code.common import CHECKPOINT_RESULTS_FILENAME
+from slop_code.common import EVALUATION_FILENAME
+from slop_code.common import INFERENCE_RESULT_FILENAME
+from slop_code.common import POSTPROCESSING_FILENAME
+from slop_code.common import SUMMARY_FILENAME
+from slop_code.entrypoints.commands.run_agent import PostprocessingResult
 from slop_code.entrypoints.commands.run_agent import _build_cli_flags
+from slop_code.entrypoints.commands.run_agent import _check_problem_needs_rerun
+from slop_code.entrypoints.commands.run_agent import (
+    _configure_named_profile_temp_root,
+)
+from slop_code.entrypoints.commands.run_agent import (
+    _create_checkpoint_results_and_summary,
+)
 from slop_code.entrypoints.commands.run_agent import _create_task_config
 from slop_code.entrypoints.commands.run_agent import _discover_problems
+from slop_code.entrypoints.commands.run_agent import _exit_on_incomplete_run
+from slop_code.entrypoints.commands.run_agent import (
+    _filter_problems_for_execution,
+)
+from slop_code.entrypoints.commands.run_agent import _final_run_status
+from slop_code.entrypoints.commands.run_agent import (
+    _finalize_after_primary_error,
+)
+from slop_code.entrypoints.commands.run_agent import (
+    _finalize_initialization_error,
+)
+from slop_code.entrypoints.commands.run_agent import (
+    _finalize_run_provenance_or_raise,
+)
 from slop_code.entrypoints.commands.run_agent import _get_nested
 from slop_code.entrypoints.commands.run_agent import _handle_early_completion
 from slop_code.entrypoints.commands.run_agent import _handle_resume_validation
 from slop_code.entrypoints.commands.run_agent import (
     _load_and_validate_run_config,
 )
+from slop_code.entrypoints.commands.run_agent import (
+    _named_checkpoint_domain_errors,
+)
 from slop_code.entrypoints.commands.run_agent import _prepare_run_artifacts
+from slop_code.entrypoints.commands.run_agent import _preview_dry_run
+from slop_code.entrypoints.commands.run_agent import (
+    _publish_new_owned_run_directory,
+)
 from slop_code.entrypoints.commands.run_agent import _resolve_output_directory
 from slop_code.entrypoints.commands.run_agent import _resolve_problem_names
+from slop_code.entrypoints.commands.run_agent import (
+    _validate_preexisting_output_provenance,
+)
 from slop_code.entrypoints.commands.run_agent import _validate_problem_paths
 from slop_code.entrypoints.commands.run_agent import _validate_resume_config
+from slop_code.entrypoints.commands.run_agent import (
+    _write_postprocessing_result,
+)
 from slop_code.problem_catalog import CatalogManifest
+
+
+def _initialize_test_provenance(
+    root: Path,
+    storage_dir: Path,
+    identity_dir: Path,
+) -> None:
+    with (
+        patch.object(provenance, "_git_repository_metadata", return_value={}),
+        patch.object(provenance, "_host_metadata", return_value={}),
+        patch.object(
+            provenance,
+            "_image_metadata",
+            return_value={"available": False},
+        ),
+        patch.object(
+            provenance,
+            "_container_tool_versions",
+            return_value={"error": "no_image"},
+        ),
+    ):
+        provenance.start_run_provenance(
+            repository_root=root,
+            run_dir=storage_dir,
+            identity_run_dir=identity_dir,
+            profile="test-profile",
+            model_provider="test",
+            model_name="model",
+            agent_type="codex",
+            agent_version="1",
+            thinking="high",
+            seed=42,
+            problem_names=["problem"],
+            catalog_version="v1",
+            catalog_commit="a" * 40,
+            num_workers=1,
+            evaluate=True,
+            environment_name="test",
+            source_image_name="",
+            base_image_name="",
+            agent_image_name="",
+            invocation=["slop-code", "run"],
+        )
 
 
 class TestGetNested:
@@ -63,6 +150,38 @@ class TestGetNested:
     def test_empty_dict(self):
         """Test with empty dictionary."""
         assert _get_nested({}, "any.key") is None
+
+
+def test_named_checkpoint_rates_must_match_counts() -> None:
+    report = {
+        "cost": 0.0,
+        "duration": 1.0,
+        "steps": 1,
+        "input": 1,
+        "output": 1,
+        "cache_read": 0,
+        "cache_write": 0,
+        "reasoning": 0,
+        "passed_tests": 7,
+        "total_tests": 10,
+        "core_passed": 2,
+        "core_total": 2,
+        "functionality_passed": 2,
+        "functionality_total": 3,
+        "error_passed": 2,
+        "error_total": 3,
+        "regression_passed": 1,
+        "regression_total": 2,
+        "strict_pass_rate": 0.8,
+        "core_pass_rate": 1.0,
+        "isolated_pass_rate": 0.75,
+    }
+
+    errors = _named_checkpoint_domain_errors(report)
+
+    assert errors == [
+        "strict_pass_rate must equal passed_tests/total_tests (0.7)"
+    ]
 
 
 class TestBuildCliFlags:
@@ -155,6 +274,52 @@ class TestLoadAndValidateRunConfig:
         assert result.model.name == "gemini-pro"
 
 
+class TestNamedProfileTempRoot:
+    def test_unnamed_run_does_not_configure_profile_root(
+        self, tmp_path: Path
+    ) -> None:
+        with patch(
+            "slop_code.entrypoints.commands.run_agent.configure_named_profile_temp_root"
+        ) as configure:
+            result = _configure_named_profile_temp_root(tmp_path, None)
+
+        assert result is None
+        configure.assert_not_called()
+
+    def test_named_run_configures_profile_root_before_execution(
+        self, tmp_path: Path
+    ) -> None:
+        expected = tmp_path / "tmp" / "scbench-v2"
+        with patch(
+            "slop_code.entrypoints.commands.run_agent.configure_named_profile_temp_root",
+            return_value=expected,
+        ) as configure:
+            result = _configure_named_profile_temp_root(
+                tmp_path,
+                "gpt-5.5-current-xhigh",
+            )
+
+        assert result == expected
+        configure.assert_called_once_with(tmp_path)
+
+    def test_invalid_explicit_profile_root_exits_nonzero(
+        self, tmp_path: Path
+    ) -> None:
+        with (
+            patch(
+                "slop_code.entrypoints.commands.run_agent.configure_named_profile_temp_root",
+                side_effect=ValueError("SLOP_CODE_TMPDIR must be absolute"),
+            ),
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            _configure_named_profile_temp_root(
+                tmp_path,
+                "paper-v2-reference",
+            )
+
+        assert exc_info.value.exit_code == 1
+
+
 class TestResolveProblemNames:
     """Tests for _resolve_problem_names helper function."""
 
@@ -233,6 +398,194 @@ class TestResolveOutputDirectory:
         new_path = tmp_path / "new_dir"
         result, existed = _resolve_output_directory(str(new_path), debug=False)
         assert result.exists()
+
+    def test_read_only_resolution_does_not_create_directory(self, tmp_path):
+        """Dry-run path resolution leaves a missing output path untouched."""
+        new_path = tmp_path / "dry-run"
+
+        result, existed = _resolve_output_directory(
+            str(new_path),
+            debug=False,
+            create=False,
+        )
+
+        assert result == new_path
+        assert existed is False
+        assert not new_path.exists()
+
+
+def test_dry_run_missing_problem_output_is_fresh_and_does_not_mutate(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_dir = tmp_path / "missing-run"
+    problem_path = tmp_path / "problems"
+    problem_path.mkdir()
+
+    with (
+        patch(
+            "slop_code.entrypoints.commands.run_agent.ProblemConfig.from_yaml",
+            return_value=MagicMock(),
+        ),
+        patch(
+            "slop_code.entrypoints.commands.run_agent.detect_resume_point"
+        ) as detect,
+    ):
+        _preview_dry_run(
+            ["prob1"],
+            run_dir,
+            problem_path,
+            "prompt",
+            MagicMock(),
+        )
+
+    output = capsys.readouterr().out
+    assert "Would start fresh (no existing run)" in output
+    assert "Resume from:" not in output
+    assert "Directories to quarantine:" not in output
+    assert not run_dir.exists()
+    detect.assert_not_called()
+
+
+def test_preexisting_named_or_provenanced_output_is_always_validated(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "provenance.json").write_text("{}\n", encoding="utf-8")
+
+    with patch(
+        "slop_code.entrypoints.commands.run_agent.validate_resumable_provenance"
+    ) as validate:
+        assert _validate_preexisting_output_provenance(
+            run_dir,
+            run_dir_preexisted=True,
+            is_resuming=False,
+            profile="gpt-5.5-current-xhigh",
+        )
+
+    validate.assert_called_once_with(run_dir)
+
+
+def test_new_named_output_does_not_require_existing_provenance(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "new-run"
+
+    with patch(
+        "slop_code.entrypoints.commands.run_agent.validate_resumable_provenance"
+    ) as validate:
+        assert not _validate_preexisting_output_provenance(
+            run_dir,
+            run_dir_preexisted=False,
+            is_resuming=False,
+            profile="gpt-5.5-current-xhigh",
+        )
+
+    validate.assert_not_called()
+    assert not run_dir.exists()
+
+
+def test_new_named_output_is_published_with_valid_provenance(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "named-run"
+
+    _publish_new_owned_run_directory(
+        run_dir,
+        lambda storage, identity: _initialize_test_provenance(
+            tmp_path,
+            storage,
+            identity,
+        ),
+    )
+
+    assert run_dir.is_dir()
+    saved = json.loads((run_dir / "provenance.json").read_text())
+    assert saved["final_status"] == "running"
+    assert saved["run"]["directory"] == str(run_dir.resolve())
+    provenance.validate_resumable_provenance(run_dir)
+
+
+def test_new_named_output_crash_after_staging_remains_resumable(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "named-run"
+    _publish_new_owned_run_directory(
+        run_dir,
+        lambda storage, identity: _initialize_test_provenance(
+            tmp_path,
+            storage,
+            identity,
+        ),
+    )
+
+    # Simulate evaluator/catalog staging and the persistent preflight append,
+    # followed by a hard crash before config preparation.
+    (run_dir / "inputs/scbench-v2-evaluator").mkdir(parents=True)
+    (run_dir / "inputs/scbench-v2-catalog").mkdir()
+    (run_dir / "scbench_v2_preflight.json").write_text(
+        '{"attempts": [{"status": "verified"}]}\n',
+        encoding="utf-8",
+    )
+
+    provenance.validate_resumable_provenance(run_dir)
+    with (
+        patch.object(provenance, "_git_repository_metadata", return_value={}),
+        patch.object(provenance, "_host_metadata", return_value={}),
+        patch.object(
+            provenance,
+            "_image_metadata",
+            return_value={"available": False},
+        ),
+        patch.object(
+            provenance,
+            "_container_tool_versions",
+            return_value={"error": "no_image"},
+        ),
+    ):
+        provenance.start_run_provenance(
+            repository_root=tmp_path,
+            run_dir=run_dir,
+            profile="test-profile",
+            model_provider="test",
+            model_name="model",
+            agent_type="codex",
+            agent_version="1",
+            thinking="high",
+            seed=42,
+            problem_names=["problem"],
+            catalog_version="v1",
+            catalog_commit="a" * 40,
+            num_workers=1,
+            evaluate=True,
+            environment_name="test",
+            source_image_name="",
+            base_image_name="",
+            agent_image_name="",
+            invocation=["slop-code", "run"],
+            require_existing=True,
+        )
+
+    saved = json.loads((run_dir / "provenance.json").read_text())
+    assert saved["invocations"][0]["status"] == (
+        "interrupted_before_next_invocation"
+    )
+
+
+def test_failed_atomic_publication_never_exposes_unowned_target(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "named-run"
+
+    def fail_after_initialization(storage: Path, identity: Path) -> None:
+        _initialize_test_provenance(tmp_path, storage, identity)
+        raise RuntimeError("crash before publication")
+
+    with pytest.raises(RuntimeError, match="crash before publication"):
+        _publish_new_owned_run_directory(run_dir, fail_after_initialization)
+
+    assert not run_dir.exists()
 
 
 class TestValidateResumeConfig:
@@ -416,14 +769,17 @@ class TestHandleEarlyCompletion:
     def test_returns_true_when_nothing_to_do(self, tmp_path):
         """Test returns True when no problems to run."""
         console = MagicMock()
-        result = _handle_early_completion(
-            problem_names=[],  # Empty - nothing to do
-            run_dir=tmp_path,
-            problems_base_path=tmp_path,
-            console=console,
-            evaluate=False,
-            requested=["prob1"],
-        )
+        with patch(
+            "slop_code.entrypoints.commands.run_agent._finalize_run_provenance_or_raise"
+        ):
+            result = _handle_early_completion(
+                problem_names=[],  # Empty - nothing to do
+                run_dir=tmp_path,
+                problems_base_path=tmp_path,
+                console=console,
+                evaluate=False,
+                requested=["prob1"],
+            )
         assert result is True
 
     def test_returns_false_when_work_remains(self, tmp_path):
@@ -439,22 +795,54 @@ class TestHandleEarlyCompletion:
         )
         assert result is False
 
+    def test_no_work_completion_rechecks_staged_catalog(self, tmp_path):
+        check = MagicMock()
+        with patch(
+            "slop_code.entrypoints.commands.run_agent._finalize_run_provenance_or_raise"
+        ):
+            result = _handle_early_completion(
+                problem_names=[],
+                run_dir=tmp_path,
+                problems_base_path=tmp_path,
+                console=MagicMock(),
+                evaluate=False,
+                requested=["prob1"],
+                catalog_integrity_check=check,
+            )
+
+        assert result is True
+        check.assert_called_once_with()
+
     @patch(
         "slop_code.entrypoints.commands.run_agent._create_checkpoint_results_and_summary"
     )
     def test_calls_summary_when_evaluate_true(self, mock_summary, tmp_path):
         """Test summary is generated when evaluate=True and nothing to do."""
         console = MagicMock()
-        result = _handle_early_completion(
-            problem_names=[],
-            run_dir=tmp_path,
-            problems_base_path=tmp_path,
-            console=console,
-            evaluate=True,
-            requested=["prob1"],
-        )
+        postprocessing = MagicMock(successful=True)
+        postprocessing.model_dump.return_value = {"status": "completed"}
+        mock_summary.return_value = postprocessing
+        with patch(
+            "slop_code.entrypoints.commands.run_agent._finalize_run_provenance_or_raise"
+        ) as finalize:
+            result = _handle_early_completion(
+                problem_names=[],
+                run_dir=tmp_path,
+                problems_base_path=tmp_path,
+                console=console,
+                evaluate=True,
+                requested=["prob1"],
+            )
         assert result is True
         mock_summary.assert_called_once()
+        finalize.assert_called_once_with(
+            tmp_path,
+            status="completed",
+            details={
+                "no_work": True,
+                "postprocessing": {"status": "completed"},
+            },
+        )
 
     @patch(
         "slop_code.entrypoints.commands.run_agent._create_checkpoint_results_and_summary"
@@ -462,16 +850,655 @@ class TestHandleEarlyCompletion:
     def test_no_summary_when_evaluate_false(self, mock_summary, tmp_path):
         """Test no summary when evaluate=False."""
         console = MagicMock()
-        result = _handle_early_completion(
-            problem_names=[],
-            run_dir=tmp_path,
-            problems_base_path=tmp_path,
-            console=console,
-            evaluate=False,
-            requested=["prob1"],
-        )
+        with patch(
+            "slop_code.entrypoints.commands.run_agent._finalize_run_provenance_or_raise"
+        ) as finalize:
+            result = _handle_early_completion(
+                problem_names=[],
+                run_dir=tmp_path,
+                problems_base_path=tmp_path,
+                console=console,
+                evaluate=False,
+                requested=["prob1"],
+            )
         assert result is True
         mock_summary.assert_not_called()
+        finalize.assert_called_once_with(
+            tmp_path,
+            status="completed",
+            details={"no_work": True, "postprocessing": None},
+        )
+
+    @patch(
+        "slop_code.entrypoints.commands.run_agent._create_checkpoint_results_and_summary"
+    )
+    def test_incomplete_postprocessing_exits_nonzero(
+        self, mock_summary, tmp_path
+    ):
+        """A no-work resume cannot silently bless an incomplete report."""
+        mock_summary.return_value = MagicMock(successful=False)
+
+        mock_summary.return_value.model_dump.return_value = {
+            "status": "incomplete"
+        }
+        with (
+            patch(
+                "slop_code.entrypoints.commands.run_agent._finalize_run_provenance_or_raise"
+            ) as finalize,
+            pytest.raises(typer.Exit) as exc_info,
+        ):
+            _handle_early_completion(
+                problem_names=[],
+                run_dir=tmp_path,
+                problems_base_path=tmp_path,
+                console=MagicMock(),
+                evaluate=True,
+                requested=["prob1"],
+            )
+
+        assert exc_info.value.exit_code == 1
+        finalize.assert_called_once_with(
+            tmp_path,
+            status="incomplete_postprocessing",
+            details={
+                "no_work": True,
+                "postprocessing": {"status": "incomplete"},
+            },
+        )
+
+
+class TestReadOnlyProblemFiltering:
+    def test_completed_stale_run_info_is_scheduled_for_metadata_repair(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        output_path = tmp_path / "run" / "prob1"
+        output_path.mkdir(parents=True)
+        problem = MagicMock(entry_file="main.py")
+        problem.iterate_checkpoint_items.return_value = [
+            ("checkpoint_1", MagicMock(name="checkpoint_1"))
+        ]
+        resume_info = ResumeInfo(
+            resume_from_checkpoint="",
+            completed_checkpoints=["checkpoint_1"],
+            last_snapshot_dir=output_path / "checkpoint_1" / "snapshot",
+            prior_usage=UsageTracker(cost=1.0, steps=2),
+            run_info_reconciliation_required=True,
+        )
+
+        with (
+            patch(
+                "slop_code.entrypoints.commands.run_agent.ProblemConfig.from_yaml",
+                return_value=problem,
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent.detect_resume_point",
+                return_value=resume_info,
+            ),
+        ):
+            needs_rerun, reason = _check_problem_needs_rerun(
+                tmp_path / "run",
+                "prob1",
+                tmp_path / "problems" / "prob1",
+                "prompt",
+                MagicMock(),
+            )
+
+        assert needs_rerun is True
+        assert reason == "stale run_info requires artifact reconciliation"
+
+    @pytest.mark.parametrize("overwrite", [False, True])
+    def test_read_only_filter_never_clears_outputs(
+        self, tmp_path, overwrite
+    ):
+        with (
+            patch(
+                "slop_code.entrypoints.commands.run_agent._check_problem_needs_rerun",
+                return_value=(True, "incomplete"),
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent._clear_problem_outputs"
+            ) as clear,
+        ):
+            to_run, _, _ = _filter_problems_for_execution(
+                tmp_path,
+                ["prob1"],
+                tmp_path,
+                "prompt",
+                MagicMock(),
+                overwrite=overwrite,
+                resume=True,
+                read_only=True,
+            )
+
+        assert to_run == ["prob1"]
+        clear.assert_not_called()
+
+
+class TestStrictPostprocessing:
+    """Completeness failures must survive as durable run evidence."""
+
+    def test_postprocessing_target_symlink_is_not_followed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        outside = tmp_path.parent / f"{tmp_path.name}-outside-postprocessing"
+        outside.write_text("preserve me\n", encoding="utf-8")
+        (tmp_path / POSTPROCESSING_FILENAME).symlink_to(outside)
+        result = PostprocessingResult(
+            status="incomplete",
+            expected_problem_names=[],
+            observed_problem_names=[],
+            executed_problem_names=[],
+            expected_checkpoints=0,
+            report_count=0,
+            summary_created=False,
+            scb_check=None,
+            errors=[],
+        )
+
+        with pytest.raises(OSError, match="symlink"):
+            _write_postprocessing_result(tmp_path, result)
+
+        assert outside.read_text(encoding="utf-8") == "preserve me\n"
+
+    @staticmethod
+    def _summary(
+        tmp_path: Path,
+        *,
+        expected_problems: int,
+        expected_checkpoints: int,
+        measured_checkpoints: int,
+    ) -> MagicMock:
+        summary = MagicMock()
+        summary.expected_problems = expected_problems
+        summary.scb_check.expected_checkpoints = expected_checkpoints
+        summary.scb_check.measured_checkpoints = measured_checkpoints
+        summary.scb_check.failed_checkpoints = 0
+        summary.scb_check.missing_snapshot_checkpoints = 0
+        summary.scb_check.missing_metadata_checkpoints = 0
+        summary.scb_check.missing_checkpoint_records = (
+            expected_checkpoints - measured_checkpoints
+        )
+        summary.scb_check.unmeasured_checkpoints = (
+            expected_checkpoints - measured_checkpoints
+        )
+        summary.scb_check.coverage_pct = (
+            measured_checkpoints / expected_checkpoints * 100
+        )
+        summary.scb_check.requested_version = "0.1.3"
+        summary.scb_check.resolved_versions = ["0.1.3"]
+        summary.scb_check.model_dump.return_value = {
+            "requested_version": "0.1.3",
+            "resolved_versions": ["0.1.3"],
+            "expected_checkpoints": expected_checkpoints,
+            "measured_checkpoints": measured_checkpoints,
+            "failed_checkpoints": 0,
+            "missing_snapshot_checkpoints": 0,
+            "missing_metadata_checkpoints": 0,
+            "missing_checkpoint_records": (
+                expected_checkpoints - measured_checkpoints
+            ),
+            "unmeasured_checkpoints": (
+                expected_checkpoints - measured_checkpoints
+            ),
+            "coverage_pct": (
+                measured_checkpoints / expected_checkpoints * 100
+            ),
+        }
+        return summary
+
+    def test_complete_reports_receive_completed_status(self, tmp_path):
+        (tmp_path / "prob1").mkdir()
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({"problems": ["prob1"]})
+        )
+        reports = [
+            {"problem": "prob1", "checkpoint": "checkpoint_1"},
+            {"problem": "prob1", "checkpoint": "checkpoint_2"},
+        ]
+        summary = self._summary(
+            tmp_path,
+            expected_problems=1,
+            expected_checkpoints=2,
+            measured_checkpoints=2,
+        )
+        problem = MagicMock(
+            checkpoints={"checkpoint_1": MagicMock(), "checkpoint_2": MagicMock()}
+        )
+
+        def save_summary(*args, **kwargs):
+            (tmp_path / SUMMARY_FILENAME).write_text("{}\n")
+            return summary
+
+        with (
+            patch(
+                "slop_code.entrypoints.commands.run_agent.count_expected_checkpoints",
+                return_value=2,
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent.ProblemConfig.from_yaml",
+                return_value=problem,
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent.evaluation_entry.create_problem_reports",
+                return_value=(reports, []),
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent.display_and_save_summary",
+                side_effect=save_summary,
+            ),
+        ):
+            result = _create_checkpoint_results_and_summary(
+                tmp_path,
+                tmp_path,
+                ["prob1"],
+                MagicMock(),
+            )
+
+        assert result.successful is True
+        assert result.report_count == 2
+        durable = json.loads((tmp_path / POSTPROCESSING_FILENAME).read_text())
+        assert durable["status"] == "completed"
+
+    def test_named_profile_requires_evaluation_and_inference_evidence(
+        self,
+        tmp_path,
+    ):
+        problem_dir = tmp_path / "prob1"
+        for checkpoint_name in ("checkpoint_1", "checkpoint_2"):
+            (problem_dir / checkpoint_name).mkdir(parents=True)
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "profile": "paper-v2-reference",
+                    "problems": ["prob1"],
+                }
+            )
+        )
+        reports = [
+            {"problem": "prob1", "checkpoint": "checkpoint_1"},
+            {"problem": "prob1", "checkpoint": "checkpoint_2"},
+        ]
+        summary = self._summary(
+            tmp_path,
+            expected_problems=1,
+            expected_checkpoints=2,
+            measured_checkpoints=2,
+        )
+        problem = MagicMock(
+            checkpoints={"checkpoint_1": MagicMock(), "checkpoint_2": MagicMock()}
+        )
+
+        def save_summary(*args, **kwargs):
+            (tmp_path / SUMMARY_FILENAME).write_text("{}\n")
+            return summary
+
+        with (
+            patch(
+                "slop_code.entrypoints.commands.run_agent.count_expected_checkpoints",
+                return_value=2,
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent.ProblemConfig.from_yaml",
+                return_value=problem,
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent.evaluation_entry.create_problem_reports",
+                return_value=(reports, []),
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent.display_and_save_summary",
+                side_effect=save_summary,
+            ),
+        ):
+            result = _create_checkpoint_results_and_summary(
+                tmp_path,
+                tmp_path,
+                ["prob1"],
+                MagicMock(),
+            )
+
+        assert result.successful is False
+        kinds = [error["kind"] for error in result.errors]
+        assert kinds.count("missing_evaluation_evidence") == 2
+        assert kinds.count("missing_inference_evidence") == 2
+
+    @pytest.mark.parametrize(
+        ("field", "impossible_value", "message"),
+        [
+            ("cost", -0.01, "cost must be"),
+            ("duration", float("nan"), "duration must be"),
+            ("steps", -1, "steps must be"),
+            ("input", -1, "input must be"),
+            ("passed_tests", 5, "passed_tests cannot exceed total_tests"),
+        ],
+    )
+    def test_named_profile_rejects_impossible_metrics_before_aggregation(
+        self,
+        tmp_path: Path,
+        field: str,
+        impossible_value: int | float,
+        message: str,
+    ) -> None:
+        checkpoint_dir = tmp_path / "prob1" / "checkpoint_1"
+        checkpoint_dir.mkdir(parents=True)
+        for filename in (EVALUATION_FILENAME, INFERENCE_RESULT_FILENAME):
+            (checkpoint_dir / filename).write_text("{}\n", encoding="utf-8")
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump(
+                {"profile": "paper-v2-reference", "problems": ["prob1"]}
+            ),
+            encoding="utf-8",
+        )
+        report: dict[str, object] = {
+            "problem": "prob1",
+            "checkpoint": "checkpoint_1",
+            "cost": 0.0,
+            "duration": 1.0,
+            "steps": 1,
+            "input": 0,
+            "output": 0,
+            "cache_read": 0,
+            "cache_write": 0,
+            "reasoning": 0,
+            "passed_tests": 4,
+            "total_tests": 4,
+            "core_passed": 1,
+            "core_total": 1,
+            "functionality_passed": 1,
+            "functionality_total": 1,
+            "error_passed": 1,
+            "error_total": 1,
+            "regression_passed": 1,
+            "regression_total": 1,
+            "strict_pass_rate": 1.0,
+            "core_pass_rate": 1.0,
+            "isolated_pass_rate": 1.0,
+        }
+        report[field] = impossible_value
+        summary = self._summary(
+            tmp_path,
+            expected_problems=1,
+            expected_checkpoints=1,
+            measured_checkpoints=1,
+        )
+        problem = MagicMock(checkpoints={"checkpoint_1": MagicMock()})
+
+        def save_summary(*args, **kwargs):
+            (tmp_path / SUMMARY_FILENAME).write_text("{}\n")
+            return summary
+
+        with (
+            patch(
+                "slop_code.entrypoints.commands.run_agent.count_expected_checkpoints",
+                return_value=1,
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent.ProblemConfig.from_yaml",
+                return_value=problem,
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent.evaluation_entry.create_problem_reports",
+                return_value=([report], []),
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent.display_and_save_summary",
+                side_effect=save_summary,
+            ),
+        ):
+            result = _create_checkpoint_results_and_summary(
+                tmp_path,
+                tmp_path,
+                ["prob1"],
+                MagicMock(),
+            )
+
+        domain_errors = [
+            error
+            for error in result.errors
+            if error["kind"] == "invalid_checkpoint_metric_domain"
+        ]
+        assert any(message in error["message"] for error in domain_errors)
+        assert result.report_count == 0
+        assert not (tmp_path / CHECKPOINT_RESULTS_FILENAME).exists()
+
+    def test_missing_problem_and_coverage_are_durable_non_success(
+        self, tmp_path
+    ):
+        (tmp_path / "prob1").mkdir()
+        (tmp_path / "config.yaml").write_text(
+            yaml.safe_dump({"problems": ["prob1", "prob2"]})
+        )
+        # A stale row from a previous selection must not survive regeneration.
+        (tmp_path / CHECKPOINT_RESULTS_FILENAME).write_text(
+            '{"problem":"stale","checkpoint":"checkpoint_9"}\n'
+        )
+        reports = [
+            {"problem": "prob1", "checkpoint": "checkpoint_1"},
+        ]
+        summary = self._summary(
+            tmp_path,
+            expected_problems=2,
+            expected_checkpoints=3,
+            measured_checkpoints=1,
+        )
+
+        def problem_config(path):
+            checkpoint_count = 1 if path.name == "prob1" else 2
+            return MagicMock(
+                checkpoints={
+                    f"checkpoint_{index}": MagicMock()
+                    for index in range(1, checkpoint_count + 1)
+                }
+            )
+
+        def save_summary(*args, **kwargs):
+            (tmp_path / SUMMARY_FILENAME).write_text("{}\n")
+            return summary
+
+        with (
+            patch(
+                "slop_code.entrypoints.commands.run_agent.count_expected_checkpoints",
+                return_value=3,
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent.ProblemConfig.from_yaml",
+                side_effect=problem_config,
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent.evaluation_entry.create_problem_reports",
+                return_value=(reports, []),
+            ),
+            patch(
+                "slop_code.entrypoints.commands.run_agent.display_and_save_summary",
+                side_effect=save_summary,
+            ),
+        ):
+            result = _create_checkpoint_results_and_summary(
+                tmp_path,
+                tmp_path,
+                ["prob1", "prob2"],
+                MagicMock(),
+            )
+
+        assert result.successful is False
+        assert {error["kind"] for error in result.errors} >= {
+            "missing_problem_output",
+            "missing_checkpoint_reports",
+            "checkpoint_report_count_mismatch",
+            "incomplete_scb_check_coverage",
+        }
+        rows = [
+            json.loads(line)
+            for line in (tmp_path / CHECKPOINT_RESULTS_FILENAME)
+            .read_text()
+            .splitlines()
+        ]
+        assert rows == reports
+        durable = json.loads((tmp_path / POSTPROCESSING_FILENAME).read_text())
+        assert durable["status"] == "incomplete"
+
+    @pytest.mark.parametrize(
+        ("problem_success", "postprocessing_success", "expected"),
+        [
+            (True, True, "completed"),
+            (False, True, "incomplete_problem_execution"),
+            (True, False, "incomplete_postprocessing"),
+            (
+                False,
+                False,
+                "incomplete_problem_execution_and_postprocessing",
+            ),
+        ],
+    )
+    def test_final_status_cannot_hide_postprocessing_failure(
+        self,
+        problem_success,
+        postprocessing_success,
+        expected,
+    ):
+        task = MagicMock(success=problem_success)
+        postprocessing = PostprocessingResult(
+            status="completed" if postprocessing_success else "incomplete",
+            expected_problem_names=["prob1"],
+            observed_problem_names=["prob1"],
+            executed_problem_names=["prob1"],
+            expected_checkpoints=1,
+            report_count=1,
+            summary_created=True,
+            scb_check={},
+            errors=[] if postprocessing_success else [{"kind": "error"}],
+        )
+
+        assert _final_run_status([task], postprocessing) == expected
+
+
+class TestRunFinalization:
+    def test_preflight_failure_is_finalized_and_resumable(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _initialize_test_provenance(tmp_path, run_dir, run_dir)
+        evidence = {"status": "failed", "errors": ["catalog drift"]}
+        (run_dir / "scbench_v2_preflight.json").write_text(
+            json.dumps({"attempts": [evidence]}),
+            encoding="utf-8",
+        )
+        primary = RuntimeError("preflight failed")
+
+        _finalize_initialization_error(
+            repository_root=tmp_path,
+            run_dir=run_dir,
+            primary_error=primary,
+            source_image_name="",
+            base_image_name="",
+            agent_image_name="",
+            preflight=evidence,
+            executed_problem_names=["problem"],
+        )
+
+        saved = json.loads((run_dir / "provenance.json").read_text())
+        assert saved["final_status"] == "failed"
+        assert saved["preflight"] == evidence
+        assert saved["artifacts"]["complete"] is False
+        provenance.validate_resumable_provenance(run_dir)
+
+    def test_docker_build_failure_binds_written_configs_and_is_resumable(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        _initialize_test_provenance(tmp_path, run_dir, run_dir)
+        (run_dir / "config.yaml").write_text("profile: test\n")
+        (run_dir / "environment.yaml").write_text("type: docker\n")
+        primary = RuntimeError("docker build failed")
+
+        _finalize_initialization_error(
+            repository_root=tmp_path,
+            run_dir=run_dir,
+            primary_error=primary,
+            source_image_name="source",
+            base_image_name="base",
+            agent_image_name="agent",
+            preflight={"status": "verified"},
+            executed_problem_names=["problem"],
+        )
+
+        saved = json.loads((run_dir / "provenance.json").read_text())
+        assert saved["final_status"] == "failed"
+        assert saved["inputs"]["resolved_config"]["sha256"] is not None
+        assert saved["inputs"]["resolved_environment"]["sha256"] is not None
+        provenance.validate_resumable_provenance(run_dir)
+
+    def test_primary_error_survives_provenance_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        primary = ValueError("agent solve failed")
+        with patch(
+            "slop_code.entrypoints.commands.run_agent.finalize_run_provenance",
+            side_effect=OSError("artifact disappeared"),
+        ) as finalize:
+            _finalize_after_primary_error(tmp_path, primary)
+
+        finalize.assert_called_once_with(
+            tmp_path,
+            status="failed",
+            error_type="ValueError",
+            checksum_artifacts=False,
+        )
+        assert any(
+            "Secondary provenance finalization failure" in note
+            and "artifact disappeared" in note
+            for note in (primary.__notes__ or [])
+        )
+
+    def test_hashing_failure_leaves_incomplete_provenance_marker(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        with (
+            patch(
+                "slop_code.entrypoints.commands.run_agent.finalize_run_provenance",
+                side_effect=[OSError("hash failed"), None],
+            ) as finalize,
+            pytest.raises(OSError, match="hash failed"),
+        ):
+            _finalize_run_provenance_or_raise(
+                tmp_path,
+                status="completed",
+                details={"postprocessing": {"status": "completed"}},
+            )
+
+        assert finalize.call_count == 2
+        fallback = finalize.call_args_list[1]
+        assert fallback.args == (tmp_path,)
+        assert fallback.kwargs["status"] == "incomplete_provenance"
+        assert fallback.kwargs["error_type"] == "OSError"
+        assert fallback.kwargs["checksum_artifacts"] is False
+        assert fallback.kwargs["details"]["requested_status"] == "completed"
+
+    @pytest.mark.parametrize(
+        "status",
+        [
+            "incomplete_problem_execution",
+            "incomplete_postprocessing",
+            "incomplete_problem_execution_and_postprocessing",
+            "incomplete_provenance",
+        ],
+    )
+    def test_incomplete_status_exits_nonzero(self, status: str) -> None:
+        with pytest.raises(typer.Exit) as exc_info:
+            _exit_on_incomplete_run(status)
+
+        assert exc_info.value.exit_code == 1
+
+    def test_completed_status_returns_normally(self) -> None:
+        _exit_on_incomplete_run("completed")
 
 
 class TestCreateTaskConfig:
@@ -572,6 +1599,39 @@ class TestPrepareRunArtifacts:
             (tmp_path / "problem_catalog.json").read_text()
         )
         assert saved_manifest == {"version": "v1.0.0", "commit": "abc123"}
+
+    @pytest.mark.parametrize("target_name", ["config.yaml", "environment.yaml"])
+    def test_configuration_symlink_is_never_followed(
+        self,
+        tmp_path: Path,
+        target_name: str,
+    ) -> None:
+        outside = tmp_path / "outside.yaml"
+        outside.write_text("untouched\n", encoding="utf-8")
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        (run_dir / target_name).symlink_to(outside)
+        run_cfg = MagicMock()
+        run_cfg.model_dump.return_value = {"profile": "test"}
+        env_spec = MagicMock()
+        env_spec.model_dump.return_value = {
+            "type": "local",
+            "name": "local",
+        }
+        agent_config = MagicMock()
+        agent_config.docker_template = None
+        manifest = CatalogManifest(version="v1.0.0", commit="abc123")
+
+        with pytest.raises(OSError, match="symlink"):
+            _prepare_run_artifacts(
+                run_dir=run_dir,
+                env_spec=env_spec,
+                agent_config=agent_config,
+                run_cfg=run_cfg,
+                catalog_manifest=manifest,
+            )
+
+        assert outside.read_text(encoding="utf-8") == "untouched\n"
 
 
 class TestDiscoverProblems:

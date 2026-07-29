@@ -21,6 +21,7 @@ RUN apt-get update \
         protobuf-compiler \
         procps \
         git \
+        ripgrep \
         graphviz \
         rabbitmq-server \
         redis-server \
@@ -63,9 +64,24 @@ RUN apt-get update \
     fi \
     && rm -rf /var/lib/apt/lists/*
 
-# Install MinIO server binary (S3-compatible object storage for testing)
-RUN curl -sSL https://dl.min.io/server/minio/release/linux-amd64/minio \
-    -o /usr/local/bin/minio && chmod +x /usr/local/bin/minio
+# Install an architecture-native, checksum-pinned MinIO server binary
+# (S3-compatible object storage for testing). The benchmark base can be built
+# for amd64 or arm64; silently relying on binfmt emulation would make the
+# resulting image non-portable to a native host of the advertised platform.
+RUN set -eux; \
+    minio_release='RELEASE.2025-09-07T16-13-09Z'; \
+    minio_arch="$(dpkg --print-architecture)"; \
+    case "$minio_arch" in \
+      amd64) minio_sha256='7c5bd8512c6e966455b1d198209358b2d191c77a83ab377c4073281065fb855f' ;; \
+      arm64) minio_sha256='5c83cd2cf151717ba0243f73e1c7802ff36e272b67144bdd7f1f7d684fd6f03d' ;; \
+      *) echo "Unsupported MinIO container architecture: $minio_arch" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL \
+      "https://dl.min.io/server/minio/release/linux-${minio_arch}/archive/minio.${minio_release}" \
+      -o /usr/local/bin/minio; \
+    printf '%s  %s\n' "$minio_sha256" /usr/local/bin/minio \
+      | sha256sum -c -; \
+    chmod +x /usr/local/bin/minio
 
 # Install Node via nvm and make it the default
 ENV NVM_DIR=/usr/local/nvm

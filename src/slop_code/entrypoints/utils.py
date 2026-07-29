@@ -281,6 +281,7 @@ def render_summary_table(summary: RunSummary, console: Console) -> None:
 
     # Counts
     table.add_row("Problems ran", str(summary.num_problems))
+    table.add_row("Problems expected", str(summary.expected_problems))
     table.add_row("Checkpoints", str(summary.num_checkpoints))
 
     # Costs
@@ -344,6 +345,34 @@ def render_summary_table(summary: RunSummary, console: Console) -> None:
     # Separator for quality section
     table.add_section()
 
+    resolved = ", ".join(summary.scb_check.resolved_versions) or "unresolved"
+    table.add_row(
+        "scb-check evaluator",
+        f"{summary.scb_check.requested_version} ({resolved})",
+    )
+    table.add_row(
+        "scb-check coverage",
+        (
+            f"{summary.scb_check.measured_checkpoints}/"
+            f"{summary.scb_check.expected_checkpoints} "
+            f"({summary.scb_check.coverage_pct:.1f}%)"
+        ),
+    )
+    if summary.scb_check.unmeasured_checkpoints > 0:
+        table.add_row(
+            "scb-check unmeasured",
+            (
+                f"{summary.scb_check.unmeasured_checkpoints} "
+                f"(failed={summary.scb_check.failed_checkpoints}, "
+                "missing snapshot="
+                f"{summary.scb_check.missing_snapshot_checkpoints}, "
+                "missing metadata="
+                f"{summary.scb_check.missing_metadata_checkpoints}, "
+                "missing record="
+                f"{summary.scb_check.missing_checkpoint_records})"
+            ),
+        )
+
     # Quality ratios (only show if data available)
     if summary.ratios.rubric.count > 0:
         table.add_row(
@@ -379,24 +408,26 @@ def count_expected_checkpoints(config: dict, problems_dir: Path) -> int:
     """Total checkpoints the run was configured to attempt.
 
     Resolves each problem in ``config['problems']`` against ``problems_dir``
-    and sums ``len(problem.checkpoints)``. Skips problems that fail to load
-    with a warning; the remaining sum is the denominator for solve rates.
+    and sums ``len(problem.checkpoints)``. Resolution is deliberately strict:
+    silently skipping a missing problem would shrink the denominator and make
+    an incomplete benchmark look better.
     """
-    problem_names = config.get("problems") or []
+    problem_names = list(dict.fromkeys(config.get("problems") or []))
+    if not problem_names:
+        raise ValueError("Run config has no configured problems")
     total = 0
     for name in problem_names:
         problem_path = problems_dir / name
         try:
             problem_config = ProblemConfig.from_yaml(problem_path)
-        except Exception as e:
-            logger.warning(
-                "Could not resolve problem for expected-checkpoint count",
-                problem=name,
-                problem_path=str(problem_path),
-                error=str(e),
-            )
-            continue
+        except Exception as exc:  # noqa: BLE001
+            raise ValueError(
+                "Could not resolve configured problem "
+                f"'{name}' at {problem_path}: {exc}"
+            ) from exc
         total += len(problem_config.checkpoints)
+    if total <= 0:
+        raise ValueError("Configured benchmark has no checkpoints")
     return total
 
 
@@ -406,6 +437,7 @@ def display_and_save_summary(
     config: dict,
     console: Console,
     expected_checkpoints: int,
+    expected_problem_names: list[str] | None = None,
 ) -> RunSummary | None:
     """Convenience function to load, compute, display, and save summary.
 
@@ -417,6 +449,8 @@ def display_and_save_summary(
         expected_checkpoints: Total checkpoints the run was configured
             to attempt. Used as the pct_checkpoints_* denominator so
             agent crashes don't inflate rates.
+        expected_problem_names: Configured problem identities used as the
+            problem-level denominator.
 
     Returns:
         RunSummary if successful, None if no data available.
@@ -445,7 +479,12 @@ def display_and_save_summary(
         )
         return None
 
-    summary = compute_run_summary(config, checkpoint_data, expected_checkpoints)
+    summary = compute_run_summary(
+        config,
+        checkpoint_data,
+        expected_checkpoints,
+        expected_problem_names=expected_problem_names,
+    )
     render_summary_table(summary, console)
     save_summary_json(summary, run_dir)
 

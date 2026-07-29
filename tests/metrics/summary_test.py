@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from slop_code.metrics.summary import compute_run_summary
+from slop_code.metrics.checkpoint import driver as checkpoint_driver
+from slop_code.metrics.summary import (
+    compute_run_summary as _compute_run_summary,
+)
+from slop_code.metrics.summary import save_summary_json
 
 
 @pytest.fixture
@@ -16,6 +20,50 @@ def mock_config() -> dict:
         "prompt_path": "test.jinja",
         "agent": {"type": "test-agent", "version": "1.0"},
     }
+
+
+def _measured_scb_check() -> dict:
+    return {
+        "evaluator": "scb-check",
+        "status": "measured",
+        "requested_version": "0.1.3",
+        "resolved_version": "0.1.3",
+        "record_persisted": True,
+        "snapshot_preserved": True,
+        "snapshot_tree_sha256": "a" * 64,
+        "snapshot_hash_algorithm": (
+            checkpoint_driver.SCB_CHECK_SNAPSHOT_HASH_ALGORITHM
+        ),
+        "environment_lock_sha256": (
+            checkpoint_driver.scb_check_lock_sha256()
+        ),
+        "environment_project_sha256": (
+            checkpoint_driver._evaluator_identity()["project_sha256"]
+        ),
+    }
+
+
+def compute_run_summary(
+    config: dict,
+    checkpoints: list[dict],
+    expected_checkpoints: int,
+    expected_problem_names: list[str] | None = None,
+):
+    """Supply explicit denominators in tests that focus on other metrics."""
+    if expected_problem_names is None and not config.get("problems"):
+        expected_problem_names = list(
+            dict.fromkeys(
+                checkpoint["problem"]
+                for checkpoint in checkpoints
+                if checkpoint.get("problem")
+            )
+        )
+    return _compute_run_summary(
+        config,
+        checkpoints,
+        expected_checkpoints,
+        expected_problem_names=expected_problem_names,
+    )
 
 
 class TestRunSummaryDeltaRemoval:
@@ -59,14 +107,54 @@ class TestRunSummaryCounts:
         )
 
         assert summary.num_problems == 2
+        assert summary.expected_problems == 2
         assert summary.num_checkpoints == 3
 
-    def test_empty_checkpoints_returns_empty_summary(self, mock_config):
-        """Test that empty checkpoints returns empty summary."""
-        summary = compute_run_summary(mock_config, [], expected_checkpoints=1)
+    def test_missing_problem_denominator_is_rejected(self, mock_config):
+        """Produced rows cannot silently define a publishable denominator."""
+        with pytest.raises(ValueError, match="configured problem denominator"):
+            _compute_run_summary(
+                mock_config,
+                [{"problem": "produced", "idx": 1}],
+                expected_checkpoints=1,
+            )
 
-        assert summary.num_problems == 0
-        assert summary.num_checkpoints == 0
+    def test_configured_absent_problem_is_unsolved_and_stale_rows_are_ignored(
+        self, mock_config
+    ):
+        """The configured suite, not produced rows, defines the denominator."""
+        mock_config["problems"] = ["produced", "absent"]
+        checkpoints = [
+            {
+                "problem": "produced",
+                "idx": 1,
+                "is_last": True,
+                "strict_pass_rate": 1.0,
+                "isolated_pass_rate": 1.0,
+            },
+            {
+                "problem": "stale-from-another-selection",
+                "idx": 1,
+                "is_last": True,
+                "strict_pass_rate": 1.0,
+                "isolated_pass_rate": 1.0,
+                "cost": 99.0,
+            },
+        ]
+
+        summary = compute_run_summary(
+            mock_config,
+            checkpoints,
+            expected_checkpoints=2,
+        )
+
+        assert summary.expected_problems == 2
+        assert summary.num_problems == 1
+        assert summary.num_checkpoints == 1
+        assert summary.problem_solved == 1
+        assert summary.pct_problems_solved == 50.0
+        assert summary.pct_checkpoints_solved == 50.0
+        assert summary.costs.total == 0.0
 
 
 class TestRunSummaryCosts:
@@ -104,6 +192,26 @@ class TestRunSummaryCosts:
         assert abs(summary.costs.checkpoint.mean - 0.15) < 0.001
         # Problem costs: prob1=0.30, prob2=0.15
         assert abs(summary.costs.problem.mean - 0.225) < 0.001
+
+    def test_summary_json_rejects_non_finite_values(
+        self, mock_config, tmp_path
+    ):
+        summary = compute_run_summary(
+            mock_config,
+            [
+                {
+                    "problem": "prob1",
+                    "idx": 1,
+                    "cost": float("nan"),
+                    "strict_pass_rate": 1.0,
+                    "isolated_pass_rate": 1.0,
+                }
+            ],
+            expected_checkpoints=1,
+        )
+
+        with pytest.raises(ValueError, match="JSON compliant"):
+            save_summary_json(summary, tmp_path)
 
 
 class TestRunSummarySolveRates:
@@ -216,6 +324,55 @@ class TestRunSummarySolveRates:
 
         assert summary.problem_solved == 1
         assert summary.pct_problems_solved == 50.0
+
+    @pytest.mark.parametrize("indices", [[1, 3]])
+    def test_missing_or_duplicate_checkpoint_identity_is_not_fully_solved(
+        self, mock_config, indices
+    ):
+        """Passing rows cannot hide a gap or duplicate in checkpoint identity."""
+        checkpoints = [
+            {
+                "problem": "incomplete",
+                "idx": index,
+                "is_last": position == len(indices) - 1,
+                "strict_pass_rate": 1.0,
+                "isolated_pass_rate": 1.0,
+            }
+            for position, index in enumerate(indices)
+        ]
+        mock_config["problems"] = ["incomplete"]
+
+        summary = compute_run_summary(
+            mock_config,
+            checkpoints,
+            expected_checkpoints=3,
+        )
+
+        assert summary.problem_solved == 0
+        assert summary.pct_problems_solved == 0.0
+        assert summary.problem_partial == 1
+        assert summary.pct_problems_partial == 100.0
+
+    def test_duplicate_checkpoint_identity_is_rejected_before_aggregation(
+        self, mock_config
+    ):
+        checkpoints = [
+            {
+                "problem": "duplicated",
+                "idx": 1,
+                "strict_pass_rate": 1.0,
+                "isolated_pass_rate": 1.0,
+                "cost": cost,
+            }
+            for cost in (1.0, 2.0)
+        ]
+
+        with pytest.raises(ValueError, match="duplicate checkpoint identity"):
+            compute_run_summary(
+                mock_config,
+                checkpoints,
+                expected_checkpoints=2,
+            )
 
     def test_computes_partial_solve_rate(self, mock_config):
         """Test that summary computes partial solve rate correctly."""
@@ -486,6 +643,7 @@ class TestRunSummaryCompositeScores:
                 "isolated_pass_rate": 1.0,
                 "verbosity": 0.95,
                 "erosion": 0.6,
+                "scb_check": _measured_scb_check(),
                 "ast_grep_violations": 999,
                 "rubric_total_flags": 999,
                 "mass.high_cc_pct": 0.01,
@@ -511,6 +669,7 @@ class TestRunSummaryCompositeScores:
                 "isolated_pass_rate": 1.0,
                 "verbosity": 0.95,
                 "erosion": 0.2,
+                "scb_check": _measured_scb_check(),
                 "loc": 1,
                 "clone_lines": 999,
                 "functions": 1,
@@ -527,6 +686,7 @@ class TestRunSummaryCompositeScores:
                 "isolated_pass_rate": 1.0,
                 "verbosity": 0.35,
                 "erosion": 0.4,
+                "scb_check": _measured_scb_check(),
                 "loc": 1,
                 "clone_lines": 999,
                 "functions": 1,
@@ -572,6 +732,30 @@ class TestRunSummaryCompositeScores:
         assert summary.erosion.mean is None
         assert summary.verbosity.mean is None
 
+    def test_rejects_composites_from_failed_evaluator(self, mock_config):
+        checkpoint = {
+            "problem": "prob1",
+            "idx": 1,
+            "strict_pass_rate": 1.0,
+            "isolated_pass_rate": 1.0,
+            "verbosity": 0.99,
+            "erosion": 0.99,
+            "scb_check": {
+                **_measured_scb_check(),
+                "status": "failed",
+            },
+        }
+
+        summary = compute_run_summary(
+            mock_config,
+            [checkpoint],
+            expected_checkpoints=1,
+        )
+
+        assert summary.scb_check.measured_checkpoints == 0
+        assert summary.verbosity.count == 0
+        assert summary.erosion.count == 0
+
     def test_time_is_empty_without_duration(self, mock_config):
         summary = compute_run_summary(
             mock_config,
@@ -581,3 +765,54 @@ class TestRunSummaryCompositeScores:
 
         assert summary.time.checkpoint.mean is None
         assert summary.time.problem.mean is None
+
+
+class TestRunSummaryScbCheckCoverage:
+    """Tests for explicit evaluator-version and coverage accounting."""
+
+    def test_counts_measured_failed_and_missing_checkpoints(self, mock_config):
+        checkpoints = [
+            {
+                "problem": "prob1",
+                "idx": 1,
+                "scb_check": {
+                    **_measured_scb_check(),
+                },
+            },
+            {
+                "problem": "prob1",
+                "idx": 2,
+                "scb_check": {
+                    "status": "failed",
+                    "requested_version": "0.1.3",
+                    "resolved_version": "0.1.3",
+                },
+            },
+            {
+                "problem": "prob2",
+                "idx": 1,
+                "scb_check": {
+                    "status": "missing_snapshot",
+                    "requested_version": "0.1.3",
+                    "resolved_version": None,
+                },
+            },
+            {"problem": "prob2", "idx": 2},
+        ]
+
+        summary = compute_run_summary(
+            mock_config,
+            checkpoints,
+            expected_checkpoints=5,
+        )
+
+        assert summary.scb_check.requested_version == "0.1.3"
+        assert summary.scb_check.resolved_versions == ["0.1.3"]
+        assert summary.scb_check.measured_checkpoints == 1
+        assert summary.scb_check.expected_checkpoints == 5
+        assert summary.scb_check.failed_checkpoints == 1
+        assert summary.scb_check.missing_snapshot_checkpoints == 1
+        assert summary.scb_check.missing_metadata_checkpoints == 1
+        assert summary.scb_check.missing_checkpoint_records == 1
+        assert summary.scb_check.unmeasured_checkpoints == 4
+        assert summary.scb_check.coverage_pct == pytest.approx(20.0)

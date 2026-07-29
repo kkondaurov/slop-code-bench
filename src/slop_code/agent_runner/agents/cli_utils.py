@@ -102,8 +102,13 @@ def stream_cli_command(
             yield parser(line)
 
     if result is None:
+        diagnostic = (
+            "Runtime stream ended without a terminal finished event; "
+            "process status is unknown"
+        )
+        stderr = f"{stderr.rstrip()}\n{diagnostic}".lstrip()
         result = RuntimeResult(
-            exit_code=0,
+            exit_code=-1,
             stdout=stdout,
             stderr=stderr,
             setup_stdout="",

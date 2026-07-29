@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 from unittest.mock import Mock
 from unittest.mock import patch
@@ -74,6 +76,205 @@ class TestSessionInitialization:
             mock_runtime1.cleanup.assert_called_once()
             mock_runtime2.cleanup.assert_called_once()
 
+    def test_finish_checkpoint_quiesces_background_writer_before_snapshot(
+        self,
+        local_environment_spec: LocalEnvironmentSpec,
+        tmp_path: Path,
+    ) -> None:
+        """No runtime can keep mutating the host tree during archive capture."""
+        managed_session = Session.from_environment_spec(
+            spec=local_environment_spec,
+            base_dir=None,
+            is_agent_infer=True,
+        )
+        output_dir = tmp_path / "snapshot"
+
+        class BackgroundWriter:
+            def __init__(self, path: Path) -> None:
+                self.path = path
+                self.stop = threading.Event()
+                self.thread = threading.Thread(target=self._write)
+                self.thread.start()
+
+            def _write(self) -> None:
+                counter = 0
+                while not self.stop.is_set():
+                    self.path.write_text(
+                        f"writing-{counter}\n",
+                        encoding="utf-8",
+                    )
+                    counter += 1
+                    time.sleep(0.001)
+
+            def cleanup(self) -> None:
+                self.stop.set()
+                self.thread.join(timeout=2)
+                assert not self.thread.is_alive()
+                self.path.write_text("quiesced\n", encoding="utf-8")
+
+        with managed_session:
+            runtime = BackgroundWriter(
+                managed_session.working_dir / "background.txt"
+            )
+            managed_session._streaming_runtimes.append(runtime)  # noqa: SLF001
+            managed_session.finish_checkpoint(output_dir)
+
+            assert not runtime.thread.is_alive()
+            assert (output_dir / "background.txt").read_text(
+                encoding="utf-8"
+            ) == "quiesced\n"
+
+    def test_finish_checkpoint_refuses_snapshot_until_runtime_is_quiesced(
+        self,
+        local_environment_spec: LocalEnvironmentSpec,
+        tmp_path: Path,
+    ) -> None:
+        """A retained live writer can never race a checkpoint snapshot."""
+        managed_session = Session.from_environment_spec(
+            spec=local_environment_spec,
+            base_dir=None,
+            is_agent_infer=True,
+        )
+        output_dir = tmp_path / "snapshot"
+
+        class FailOnceRuntime:
+            def __init__(self, path: Path) -> None:
+                self.path = path
+                self.stop = threading.Event()
+                self.thread = threading.Thread(target=self._write)
+                self.cleanup_attempts = 0
+                self.thread.start()
+
+            def _write(self) -> None:
+                counter = 0
+                while not self.stop.is_set():
+                    self.path.write_text(
+                        f"live-{counter}\n",
+                        encoding="utf-8",
+                    )
+                    counter += 1
+                    time.sleep(0.001)
+
+            def cleanup(self) -> None:
+                self.cleanup_attempts += 1
+                if self.cleanup_attempts == 1:
+                    raise RuntimeError("container stop failed")
+                self.stop.set()
+                self.thread.join(timeout=2)
+                assert not self.thread.is_alive()
+                self.path.write_text("quiesced\n", encoding="utf-8")
+
+        with managed_session:
+            runtime = FailOnceRuntime(
+                managed_session.working_dir / "runtime-state.txt"
+            )
+            managed_session._streaming_runtimes.append(runtime)  # noqa: SLF001
+            with pytest.raises(RuntimeError, match="container stop failed"):
+                managed_session.finish_checkpoint(output_dir)
+
+            assert runtime.thread.is_alive()
+            assert not output_dir.exists()
+            assert managed_session._streaming_runtimes == [runtime]  # noqa: SLF001
+
+            managed_session.finish_checkpoint(output_dir)
+
+            assert not runtime.thread.is_alive()
+            assert (output_dir / "runtime-state.txt").read_text(
+                encoding="utf-8"
+            ) == "quiesced\n"
+
+    def test_snapshot_cleanup_never_masks_snapshot_capture_failure(
+        self,
+        local_environment_spec: LocalEnvironmentSpec,
+        tmp_path: Path,
+    ) -> None:
+        managed_session = Session.from_environment_spec(
+            spec=local_environment_spec,
+            base_dir=None,
+            is_agent_infer=True,
+        )
+        managed_session.prepare()
+        old_snapshot = Mock()
+        old_snapshot.cleanup.side_effect = RuntimeError(
+            "old snapshot cleanup failed"
+        )
+        primary = ValueError("snapshot capture failed")
+        original_snapshot = managed_session.workspace.initial_snapshot
+        new_snapshot = Mock()
+        new_snapshot.extract_to_path.side_effect = primary
+        managed_session.workspace._initial_snapshot = new_snapshot  # noqa: SLF001
+
+        try:
+            with (
+                patch.object(
+                    managed_session.workspace,
+                    "update_snapshot",
+                    return_value=old_snapshot,
+                ),
+                pytest.raises(ValueError, match="snapshot capture failed") as caught,
+            ):
+                managed_session.finish_checkpoint(tmp_path / "snapshot")
+        finally:
+            managed_session.workspace._initial_snapshot = original_snapshot  # noqa: SLF001
+            managed_session.cleanup()
+
+        assert caught.value is primary
+        assert any(
+            "old snapshot cleanup failed" in note
+            for note in getattr(primary, "__notes__", [])
+        )
+
+    def test_cleanup_retains_runtime_and_preserves_workspace_after_retry_fails(
+        self,
+        session: Session,
+    ) -> None:
+        runtime = Mock(spec=StreamingRuntime)
+        runtime.cleanup.side_effect = [
+            RuntimeError("runtime cleanup failed"),
+            RuntimeError("runtime cleanup retry failed"),
+        ]
+        session._streaming_runtimes = [runtime]  # noqa: SLF001
+
+        with (
+            patch.object(session.workspace, "cleanup") as cleanup_workspace,
+            patch.object(session.workspace, "cleanup_snapshot") as cleanup_snapshot,
+            pytest.raises(RuntimeError, match="runtime cleanup failed"),
+        ):
+            session.cleanup()
+
+        assert runtime.cleanup.call_count == 2
+        cleanup_workspace.assert_not_called()
+        cleanup_snapshot.assert_not_called()
+        assert session._streaming_runtimes == [runtime]  # noqa: SLF001
+
+    def test_cleanup_retry_never_masks_cancellation(
+        self,
+        session: Session,
+    ) -> None:
+        runtime = Mock(spec=StreamingRuntime)
+        cancellation = KeyboardInterrupt("cancel cleanup retry")
+        runtime.cleanup.side_effect = [
+            RuntimeError("first cleanup failed"),
+            cancellation,
+        ]
+        session._streaming_runtimes = [runtime]  # noqa: SLF001
+
+        with (
+            patch.object(session.workspace, "cleanup") as cleanup_workspace,
+            patch.object(session.workspace, "cleanup_snapshot") as cleanup_snapshot,
+            pytest.raises(KeyboardInterrupt) as caught,
+        ):
+            session.cleanup()
+
+        assert caught.value is cancellation
+        assert any(
+            "first cleanup failed" in note
+            for note in getattr(cancellation, "__notes__", [])
+        )
+        cleanup_workspace.assert_not_called()
+        cleanup_snapshot.assert_not_called()
+        assert session._streaming_runtimes == [runtime]  # noqa: SLF001
+
     def test_cleanup_integration(self, session: Session, workspace: Workspace):
         """Test cleanup integration with real workspace."""
         session.prepare()
@@ -82,6 +283,93 @@ class TestSessionInitialization:
         session.cleanup()
 
         assert not working_dir.exists()
+
+    def test_context_preserves_body_error_when_cleanup_also_fails(
+        self,
+        session: Session,
+    ) -> None:
+        primary = ValueError("evaluation exploded")
+
+        with (
+            patch.object(session, "prepare"),
+            patch.object(
+                session,
+                "cleanup",
+                side_effect=RuntimeError("cleanup goblin"),
+            ),
+            pytest.raises(ValueError, match="evaluation exploded") as caught,
+            session,
+        ):
+            raise primary
+
+        assert caught.value is primary
+        assert any(
+            "cleanup goblin" in note
+            for note in getattr(primary, "__notes__", [])
+        )
+
+    @pytest.mark.parametrize("control_flow_type", [KeyboardInterrupt, SystemExit])
+    def test_context_cleanup_never_swallows_control_flow(
+        self,
+        session: Session,
+        control_flow_type: type[BaseException],
+    ) -> None:
+        primary = ValueError("evaluation exploded")
+        cancellation = control_flow_type("stop cleanup")
+
+        with (
+            patch.object(session, "prepare"),
+            patch.object(session, "cleanup", side_effect=cancellation),
+            pytest.raises(control_flow_type) as caught,
+            session,
+        ):
+            raise primary
+
+        assert caught.value is cancellation
+        assert any(
+            "Earlier session failure" in note
+            for note in getattr(cancellation, "__notes__", [])
+        )
+
+    @pytest.mark.parametrize("raise_during_session", [False, True])
+    def test_context_cleans_all_benchmark_temp_directories(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        local_environment_spec: LocalEnvironmentSpec,
+        *,
+        raise_during_session: bool,
+    ) -> None:
+        temp_root = tmp_path / "benchmark-tmp"
+        temp_root.mkdir()
+        monkeypatch.setenv("SLOP_CODE_TMPDIR", str(temp_root))
+        output_dir = tmp_path / "durable-snapshot"
+        managed_session = Session.from_environment_spec(
+            spec=local_environment_spec,
+            base_dir=None,
+            is_agent_infer=True,
+        )
+
+        if raise_during_session:
+            with (
+                pytest.raises(RuntimeError, match="simulated failure"),
+                managed_session,
+            ):
+                (managed_session.working_dir / "main.py").write_text(
+                    "raise SystemExit\n",
+                    encoding="utf-8",
+                )
+                raise RuntimeError("simulated failure")
+        else:
+            with managed_session:
+                (managed_session.working_dir / "main.py").write_text(
+                    "print('ok')\n",
+                    encoding="utf-8",
+                )
+                managed_session.finish_checkpoint(output_dir)
+
+        assert output_dir.exists() is (not raise_during_session)
+        assert list(temp_root.iterdir()) == []
 
     def test_reset_calls_workspace_reset(
         self, session: Session, workspace: Workspace

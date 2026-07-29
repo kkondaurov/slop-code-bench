@@ -26,6 +26,7 @@ from slop_code.common.llms import APIPricing
 from slop_code.common.llms import ModelDefinition
 from slop_code.common.llms import ThinkingPreset
 from slop_code.common.llms import TokenUsage
+from slop_code.common.temp import temporary_directory
 from slop_code.execution import EnvironmentSpec
 from slop_code.execution import Session
 from slop_code.execution import StreamingRuntime
@@ -360,7 +361,7 @@ disable_color = true
 
     def setup(self, session: Session) -> None:
         """Set up the agent with a session."""
-        self._tmp_dir = tempfile.TemporaryDirectory()
+        self._tmp_dir = temporary_directory()
         self._session = session
         self._environment = session.spec
 
@@ -673,6 +674,7 @@ disable_color = true
             self._tmp_dir = None
 
         self._session = None
+        self._environment = None
 
 
 # Register this agent type with the agent registry

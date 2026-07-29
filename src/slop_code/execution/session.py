@@ -15,6 +15,7 @@ Sessions provide a convenient interface for managing complete execution
 environments with proper resource cleanup and state management.
 """
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +38,48 @@ logger = get_logger(__name__)
 
 class SessionError(Exception):
     """Exception raised by the Session class."""
+
+
+def cleanup_preserving_primary(
+    cleanup: Callable[[], None],
+    primary_error: BaseException | None,
+    *,
+    phase: str,
+) -> None:
+    """Run cleanup without replacing an already-active failure."""
+    try:
+        cleanup()
+    except BaseException as cleanup_error:  # noqa: BLE001
+        if primary_error is None:
+            raise
+        if not isinstance(cleanup_error, Exception):
+            cleanup_error.add_note(
+                f"Earlier {phase} failure: "
+                f"{type(primary_error).__qualname__}: {primary_error}"
+            )
+            logger.error(
+                "Cancellation/control flow interrupted cleanup",
+                phase=phase,
+                primary_error_type=type(primary_error).__qualname__,
+                primary_error_message=str(primary_error),
+                cleanup_error_type=type(cleanup_error).__qualname__,
+                cleanup_error_message=str(cleanup_error),
+                exc_info=True,
+            )
+            raise
+        primary_error.add_note(
+            f"Secondary {phase} cleanup failure: "
+            f"{type(cleanup_error).__qualname__}: {cleanup_error}"
+        )
+        logger.error(
+            "Cleanup failed while preserving an active error",
+            phase=phase,
+            primary_error_type=type(primary_error).__qualname__,
+            primary_error_message=str(primary_error),
+            cleanup_error_type=type(cleanup_error).__qualname__,
+            cleanup_error_message=str(cleanup_error),
+            exc_info=True,
+        )
 
 
 class Session:
@@ -187,11 +230,106 @@ class Session:
             num_exec_runtimes=len(self._exec_runtimes),
             verbose=True,
         )
-        for runtime in self._streaming_runtimes:
-            runtime.cleanup()
-        for runtime in self._exec_runtimes:
-            runtime.cleanup()
-        self.workspace.cleanup()
+        try:
+            self.cleanup_runtimes()
+        except BaseException as error:  # noqa: BLE001
+            if not isinstance(error, Exception):
+                raise
+            logger.warning(
+                "Runtime cleanup failed; retrying retained runtimes once",
+                error_type=type(error).__qualname__,
+                error_message=str(error),
+            )
+            try:
+                self.cleanup_runtimes()
+            except BaseException as retry_error:  # noqa: BLE001
+                if not isinstance(retry_error, Exception):
+                    retry_error.add_note(
+                        "An earlier runtime cleanup attempt also failed: "
+                        f"{type(error).__qualname__}: {error}"
+                    )
+                    raise
+                error.add_note(
+                    "Runtime cleanup retry also failed: "
+                    f"{type(retry_error).__qualname__}: {retry_error}"
+                )
+                raise error
+
+        cleanup_error: BaseException | None = None
+        try:
+            self.workspace.cleanup()
+        except BaseException as error:  # noqa: BLE001
+            if cleanup_error is None:
+                cleanup_error = error
+            else:
+                logger.error(
+                    "Workspace cleanup failed after runtime cleanup error",
+                    error_type=type(error).__qualname__,
+                    error_message=str(error),
+                    exc_info=True,
+                )
+        try:
+            self.workspace.cleanup_snapshot()
+        except BaseException as error:  # noqa: BLE001
+            if cleanup_error is None:
+                cleanup_error = error
+            else:
+                logger.error(
+                    "Snapshot cleanup failed after an earlier cleanup error",
+                    error_type=type(error).__qualname__,
+                    error_message=str(error),
+                    exc_info=True,
+                )
+        if cleanup_error is not None:
+            raise cleanup_error
+
+    def cleanup_runtimes(self) -> None:
+        """Stop Session-owned runtimes while preserving the host workspace."""
+        logger.debug(
+            "Cleaning up session runtimes",
+            num_streaming_runtimes=len(self._streaming_runtimes),
+            num_exec_runtimes=len(self._exec_runtimes),
+            verbose=True,
+        )
+        cleanup_error: BaseException | None = None
+        streaming_runtimes = self._streaming_runtimes
+        exec_runtimes = self._exec_runtimes
+        self._streaming_runtimes = []
+        self._exec_runtimes = []
+
+        for runtime in streaming_runtimes:
+            try:
+                runtime.cleanup()
+            except BaseException as error:  # noqa: BLE001
+                # Retain ownership so a later Session.cleanup() can retry the
+                # stop/remove operation. In particular, a Docker container
+                # with a host bind mount must never become unreachable here.
+                self._streaming_runtimes.append(runtime)
+                if cleanup_error is None:
+                    cleanup_error = error
+                else:
+                    logger.error(
+                        "Additional runtime cleanup failed",
+                        error_type=type(error).__qualname__,
+                        error_message=str(error),
+                        exc_info=True,
+                    )
+        for runtime in exec_runtimes:
+            try:
+                runtime.cleanup()
+            except BaseException as error:  # noqa: BLE001
+                self._exec_runtimes.append(runtime)
+                if cleanup_error is None:
+                    cleanup_error = error
+                else:
+                    logger.error(
+                        "Additional runtime cleanup failed",
+                        error_type=type(error).__qualname__,
+                        error_message=str(error),
+                        exc_info=True,
+                    )
+        if cleanup_error is not None:
+            raise cleanup_error
 
     def __enter__(self) -> "Session":
         """Context manager entry."""
@@ -200,7 +338,11 @@ class Session:
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         """Context manager exit."""
-        self.cleanup()
+        cleanup_preserving_primary(
+            self.cleanup,
+            exc_value,
+            phase="session",
+        )
 
     @property
     def working_dir(self) -> Path:
@@ -314,23 +456,52 @@ class Session:
             verbose=True,
         )
 
-        old_snapshot = self.workspace.update_snapshot()
-        new_snapshot = self.workspace.initial_snapshot
-
-        output_dir.mkdir(parents=True, exist_ok=True)
-        new_snapshot.extract_to_path(output_dir)
-
-        archive_filename = new_snapshot.archive.name
-        archive_in_output = output_dir / archive_filename
-        if archive_in_output.exists():
-            logger.debug(
-                "Removing snapshot archive from output directory",
-                archive=str(archive_in_output),
-                verbose=True,
+        try:
+            # The workspace is a host bind mount for Docker agents. Stop every
+            # process/container that can still mutate it before reading bytes.
+            self.cleanup_runtimes()
+        except BaseException:
+            # A failed runtime remains Session-owned for a later cleanup retry.
+            # Its bind-mounted process may still be writing, so fail closed
+            # instead of producing a racy snapshot that looks durable.
+            logger.error(
+                "Runtime cleanup failed; refusing live workspace snapshot",
+                output_dir=str(output_dir),
+                exc_info=True,
             )
-            archive_in_output.unlink()
+            raise
 
-        return SnapshotDiff.from_snapshots(old_snapshot, new_snapshot)
+        old_snapshot: Snapshot | None = None
+        snapshot_error: BaseException | None = None
+        try:
+            old_snapshot = self.workspace.update_snapshot()
+            new_snapshot = self.workspace.initial_snapshot
+            output_dir.mkdir(parents=True, exist_ok=True)
+            new_snapshot.extract_to_path(output_dir)
+
+            archive_filename = new_snapshot.archive.name
+            archive_in_output = output_dir / archive_filename
+            if archive_in_output.exists():
+                logger.debug(
+                    "Removing snapshot archive from output directory",
+                    archive=str(archive_in_output),
+                    verbose=True,
+                )
+                archive_in_output.unlink()
+
+            diff = SnapshotDiff.from_snapshots(old_snapshot, new_snapshot)
+        except BaseException as error:  # noqa: BLE001
+            snapshot_error = error
+            raise
+        finally:
+            if old_snapshot is not None:
+                cleanup_preserving_primary(
+                    old_snapshot.cleanup,
+                    snapshot_error,
+                    phase="previous checkpoint snapshot",
+                )
+
+        return diff
 
     @classmethod
     def from_environment_spec(

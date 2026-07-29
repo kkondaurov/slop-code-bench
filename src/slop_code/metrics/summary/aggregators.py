@@ -11,12 +11,16 @@ import statistics
 from typing import Any
 
 from slop_code.logging import get_logger
+from slop_code.metrics.checkpoint.driver import SCB_CHECK_NAME
+from slop_code.metrics.checkpoint.driver import SCB_CHECK_VERSION
+from slop_code.metrics.checkpoint.driver import is_valid_scb_check_metadata
 from slop_code.metrics.models import CostsStats
 from slop_code.metrics.models import CyclomaticComplexityStats
 from slop_code.metrics.models import MetricStats
 from slop_code.metrics.models import PassRatesByType
 from slop_code.metrics.models import PassRatesStats
 from slop_code.metrics.models import RatiosStats
+from slop_code.metrics.models import ScbCheckCoverage
 from slop_code.metrics.models import StepsStats
 from slop_code.metrics.models import TimeStats
 from slop_code.metrics.models import TokenMeans
@@ -130,8 +134,26 @@ def _is_problem_fully_solved(chkpts: list[dict[str, Any]]) -> bool:
     if not rates or not all(math.isclose(pr, 1.0) for pr in rates):
         return False
 
+    indices = [checkpoint.get("idx") for checkpoint in chkpts]
+    if any(
+        type(index) is not int or index < 1  # type: ignore[operator]
+        for index in indices
+    ):
+        return False
+    typed_indices = [int(index) for index in indices]
+    if len(set(typed_indices)) != len(typed_indices):
+        return False
+    last_index = max(typed_indices)
+    if set(typed_indices) != set(range(1, last_index + 1)):
+        return False
+
     if any("is_last" in c for c in chkpts):
-        return any(c.get("is_last") is True for c in chkpts)
+        terminal_indices = [
+            int(checkpoint["idx"])
+            for checkpoint in chkpts
+            if checkpoint.get("is_last") is True
+        ]
+        return terminal_indices == [last_index]
 
     return True
 
@@ -140,21 +162,19 @@ def compute_solve_rates(
     checkpoints: list[dict[str, Any]],
     problems: dict[str, list[dict[str, Any]]],
     expected_checkpoints: int,
+    expected_problem_names: list[str],
 ) -> dict[str, float | None]:
     """Compute solve rate percentages normalized to the benchmark total.
 
-    The pct_checkpoints_* fields use ``expected_checkpoints`` as the
-    denominator, which is the total count the run was configured to
-    attempt (sum of checkpoint counts across the problem list). Using
-    ``len(checkpoints)`` instead would let agent crashes shrink the
-    denominator and inflate the percentage; callers must pass the
-    configured total so missing checkpoints correctly count as
-    unsolved.
+    Checkpoint and problem percentages use configured denominators. Using only
+    produced records would let crashes shrink either denominator and inflate
+    the result.
 
     Args:
         checkpoints: Checkpoint records actually produced by the run.
         problems: Checkpoints grouped by problem (for problem-level stats).
         expected_checkpoints: Total checkpoints configured for the run.
+        expected_problem_names: Ordered, unique configured problem names.
 
     Returns:
         Dict with raw counts and percentages.
@@ -163,7 +183,6 @@ def compute_solve_rates(
         raise ValueError(
             f"expected_checkpoints must be positive, got {expected_checkpoints}"
         )
-
     pass_rates_list = extract_metric_values(checkpoints, "strict_pass_rate")
     iso_pass_rates_list = extract_metric_values(
         checkpoints, "isolated_pass_rate"
@@ -172,6 +191,8 @@ def compute_solve_rates(
 
     if not pass_rates_list or not iso_pass_rates_list:
         return {}
+    if not expected_problem_names:
+        raise ValueError("expected_problem_names must not be empty")
 
     # Count checkpoints that fully pass (rate = 1.0)
     checkpoints_solved = sum(
@@ -182,16 +203,19 @@ def compute_solve_rates(
 
     # Count problems fully vs partially solved
     fully_solved = sum(
-        1 for chkpts in problems.values() if _is_problem_fully_solved(chkpts)
+        1
+        for name in expected_problem_names
+        if _is_problem_fully_solved(problems.get(name, []))
     )
     partially_solved = sum(
         1
-        for chkpts in problems.values()
+        for name in expected_problem_names
+        if (chkpts := problems.get(name, []))
         if (rates := [c.get("strict_pass_rate", 0.0) for c in chkpts])
         and any(pr == 1.0 for pr in rates)
     )
 
-    num_problems = len(problems)
+    num_problems = len(expected_problem_names)
 
     return {
         "pct_checkpoints_solved": (checkpoints_solved / expected_checkpoints)
@@ -307,19 +331,79 @@ def compute_ratios_stats(checkpoints: list[dict[str, Any]]) -> RatiosStats:
 def compute_composite_scores(
     checkpoints: list[dict[str, Any]],
 ) -> dict[str, MetricStats]:
-    """Compute summary stats from checkpoint-owned composite scores."""
+    """Aggregate only evaluator-owned, fully evidenced composite scores."""
+    measured = [
+        checkpoint
+        for checkpoint in checkpoints
+        if is_valid_scb_check_metadata(checkpoint.get("scb_check"))
+    ]
     verbosity_values = [
         float(value)
-        for value in extract_metric_values(checkpoints, "verbosity")
-        if isinstance(value, int | float)
+        for checkpoint in measured
+        if isinstance((value := checkpoint.get("verbosity")), int | float)
+        and not isinstance(value, bool)
     ]
     erosion_values = [
         float(value)
-        for value in extract_metric_values(checkpoints, "erosion")
-        if isinstance(value, int | float)
+        for checkpoint in measured
+        if isinstance((value := checkpoint.get("erosion")), int | float)
+        and not isinstance(value, bool)
     ]
 
     return {
         "verbosity": compute_metric_stats(verbosity_values),
         "erosion": compute_metric_stats(erosion_values),
     }
+
+
+def compute_scb_check_coverage(
+    checkpoints: list[dict[str, Any]],
+    expected_checkpoints: int,
+) -> ScbCheckCoverage:
+    """Count explicit quality measurements against the configured total."""
+    measured = 0
+    failed = 0
+    missing_snapshot = 0
+    missing_metadata = 0
+    resolved_versions: set[str] = set()
+
+    for checkpoint in checkpoints:
+        metadata = checkpoint.get("scb_check")
+        if not isinstance(metadata, dict):
+            missing_metadata += 1
+            continue
+
+        resolved = metadata.get("resolved_version")
+        if isinstance(resolved, str) and resolved:
+            resolved_versions.add(resolved)
+
+        status = metadata.get("status")
+        if is_valid_scb_check_metadata(metadata):
+            measured += 1
+        elif status in {"measured", "failed"}:
+            failed += 1
+        elif status == "missing_snapshot":
+            missing_snapshot += 1
+        else:
+            missing_metadata += 1
+
+    missing_records = max(expected_checkpoints - len(checkpoints), 0)
+    unmeasured = max(expected_checkpoints - measured, 0)
+    coverage_pct = (
+        measured / expected_checkpoints * 100
+        if expected_checkpoints > 0
+        else 0.0
+    )
+    return ScbCheckCoverage(
+        evaluator=SCB_CHECK_NAME,
+        requested_version=SCB_CHECK_VERSION,
+        resolved_versions=sorted(resolved_versions),
+        measured_checkpoints=measured,
+        expected_checkpoints=expected_checkpoints,
+        failed_checkpoints=failed,
+        missing_snapshot_checkpoints=missing_snapshot,
+        missing_metadata_checkpoints=missing_metadata,
+        missing_checkpoint_records=missing_records,
+        unmeasured_checkpoints=unmeasured,
+        coverage_pct=coverage_pct,
+    )

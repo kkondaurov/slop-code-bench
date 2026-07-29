@@ -6,7 +6,9 @@ environment with proper user permissions.
 
 from __future__ import annotations
 
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -33,8 +35,10 @@ def run_docker_command(
         mounts={},
         env_vars={},
         setup_command=None,
+        image=env.docker.image,
         is_evaluation=False,
         disable_setup=True,
+        user=env.get_eval_user(),
     )
     try:
         return runtime.execute(env={}, stdin=None, timeout=timeout)
@@ -49,7 +53,7 @@ def docker_python_env() -> DockerEnvironmentSpec:
         Path(__file__).parent.parent.parent
         / "configs"
         / "environments"
-        / "docker-python3.12-uv.yaml"
+        / "docker-python3.12-uv-scb-v2.yaml"
     )
     with config_path.open() as f:
         config = yaml.safe_load(f)
@@ -60,34 +64,37 @@ def cleanup_as_root(path: Path) -> None:
     """Clean up a directory that may have root-owned files using docker."""
     if not path.exists():
         return
-    # Use docker to remove files as root
-    subprocess.run(
+    docker_binary = shutil.which("docker")
+    if docker_binary is None:
+        raise RuntimeError("docker executable not found")
+    result = subprocess.run(  # noqa: S603
         [
-            "docker",
+            docker_binary,
             "run",
             "--rm",
             "-v",
-            f"{path}:/cleanup",
+            f"{path.parent}:/cleanup-parent",
             "alpine:latest",
             "rm",
             "-rf",
-            "/cleanup",
+            f"/cleanup-parent/{path.name}",
         ],
         capture_output=True,
         check=False,
     )
-    # Remove the now-empty directory
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.decode(errors="replace"))
     if path.exists():
-        path.rmdir()
+        shutil.rmtree(path)
 
 
 @pytest.fixture
-def workspace_dir(tmp_path: Path):
-    """Create a workspace directory that gets properly cleaned up."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
+def workspace_dir():
+    """Create a Docker-visible workspace and clean it up reliably."""
+    temp_root = Path(__file__).resolve().parents[2] / "tmp" / "docker-tests"
+    temp_root.mkdir(parents=True, exist_ok=True)
+    workspace = Path(tempfile.mkdtemp(prefix="resume-", dir=temp_root))
     yield workspace
-    # Clean up any root-owned files created by docker
     cleanup_as_root(workspace)
 
 
@@ -109,8 +116,6 @@ class TestResumeCommandsIntegration:
         (snapshot_dir / "main.py").write_text("print('hello')\n")
 
         # Copy snapshot to workspace
-        import shutil
-
         for item in snapshot_dir.iterdir():
             if item.is_dir():
                 shutil.copytree(item, workspace_dir / item.name)
@@ -125,7 +130,6 @@ class TestResumeCommandsIntegration:
             result = run_docker_command(
                 docker_python_env, workspace_dir, cmd, timeout=120
             )
-            # Commands use || true so should always succeed
             assert result.exit_code == 0, (
                 f"Resume command failed: {cmd}\n"
                 f"stdout: {result.stdout}\n"
@@ -173,7 +177,7 @@ class TestResumeCommandsIntegration:
         # No requirements.txt - simulates a problem that doesn't need deps
         (workspace_dir / "main.py").write_text("print('no deps')\n")
 
-        # All resume commands should succeed (they use || true)
+        # Missing metadata is valid, but actual command failures are not.
         for cmd in docker_python_env.get_resume_commands():
             result = run_docker_command(
                 docker_python_env, workspace_dir, cmd, timeout=120

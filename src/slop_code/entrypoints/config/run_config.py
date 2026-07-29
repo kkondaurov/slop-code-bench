@@ -75,6 +75,7 @@ class RunConfig(BaseModel):
     - An inline dict with the full configuration
 
     Attributes:
+        profile: Stable experiment-profile identifier, when one is declared.
         agent: Agent config reference (bare name, path, or inline dict)
         environment: Environment config reference (bare name, path, or inline dict)
         prompt: Prompt template reference (bare name or path, stem only for bare names)
@@ -89,6 +90,8 @@ class RunConfig(BaseModel):
     """
 
     model_config = ConfigDict(extra="forbid")
+
+    profile: str | None = None
 
     # Can be: bare name, path string, or inline dict
     agent: str | dict[str, Any] = "claude_code-2.0.51"
@@ -140,6 +143,7 @@ class ResolvedRunConfig(BaseModel):
     is ready for execution.
 
     Attributes:
+        profile: Stable experiment-profile identifier, when one is declared.
         agent_config_path: Resolved path to agent config file (if not inline)
         agent: The loaded agent config data as a dict
         environment_config_path: Resolved path to environment config file
@@ -159,6 +163,7 @@ class ResolvedRunConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
+    profile: str | None = None
     agent_config_path: Path | None
     agent: dict[str, Any]
     environment_config_path: Path | None

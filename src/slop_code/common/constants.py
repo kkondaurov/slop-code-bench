@@ -23,9 +23,12 @@ AST_GREP_QUALITY_SAVENAME = "ast_grep.jsonl"
 CONFIG_FILENAME = "config.yaml"
 SUMMARY_FILENAME = "result.json"
 CHECKPOINT_RESULTS_FILENAME = "checkpoint_results.jsonl"
+POSTPROCESSING_FILENAME = "postprocessing.json"
 
 VERIFIER_REPORT_FILENAME = "reports.parquet"
 EVALUATION_FILENAME = "evaluation.json"
+EVALUATION_ERROR_FILENAME = "evaluation_error.json"
+RESUME_ERROR_FILENAME = "resume_error.json"
 
 # Visualization/dashboard files
 DASHBOARD_CONFIG_FILENAME = "dashboard_config.json"
@@ -34,6 +37,7 @@ DASHBOARD_CONFIG_FILENAME = "dashboard_config.json"
 AGENT_DIR_NAME = "agent"
 AGENT_TAR_FILENAME = "agent.tar.gz"
 SNAPSHOT_DIR_NAME = "snapshot"
+QUARANTINED_CHECKPOINTS_DIR_NAME = ".invalidated-checkpoints"
 
 # Configuration files
 ENV_CONFIG_NAME = "environment.yaml"

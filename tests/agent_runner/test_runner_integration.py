@@ -433,14 +433,21 @@ def test_agent_runner_saves_artifacts_when_checkpoint_is_interrupted(
         output_path=output_path,
         progress_queue=queue.Queue(),
     )
-    runner_instance._session = FakeSession(tmp_path / "workspace")
+    fake_session = FakeSession(tmp_path / "workspace")
 
     checkpoint = StubCheckpoint(name="first", spec_text="Spec for first")
-    with pytest.raises(KeyboardInterrupt):
+    with (
+        patch(
+            "slop_code.agent_runner.runner.create_agent_session",
+            return_value=fake_session,
+        ),
+        pytest.raises(KeyboardInterrupt),
+    ):
         runner_instance._run_checkpoint(
             checkpoint,
             checkpoint_dir,
             is_first_checkpoint=True,
+            prior_snapshot_dir=None,
         )
 
     artifacts_dir = checkpoint_dir / AGENT_DIR_NAME
@@ -469,17 +476,24 @@ def test_agent_runner_saves_artifacts_when_checkpoint_returns_no_result(
         output_path=output_path,
         progress_queue=queue.Queue(),
     )
-    runner_instance._session = FakeSession(tmp_path / "workspace")
+    fake_session = FakeSession(tmp_path / "workspace")
 
     checkpoint = StubCheckpoint(name="first", spec_text="Spec for first")
-    with patch(
-        "slop_code.agent_runner.runner.run_checkpoint",
-        return_value=(snapshot_dir, None, FakeDiff()),
+    with (
+        patch(
+            "slop_code.agent_runner.runner.create_agent_session",
+            return_value=fake_session,
+        ),
+        patch(
+            "slop_code.agent_runner.runner.run_checkpoint",
+            return_value=(snapshot_dir, None, FakeDiff()),
+        ),
     ):
         summary = runner_instance._run_checkpoint(
             checkpoint,
             checkpoint_dir,
             is_first_checkpoint=True,
+            prior_snapshot_dir=None,
         )
 
     assert summary.had_error is True

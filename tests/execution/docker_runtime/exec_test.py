@@ -8,6 +8,9 @@ from unittest.mock import patch
 
 import pytest
 
+from slop_code.common.temp import TEMP_ROOT_ENV
+from slop_code.common.temp import configure_named_profile_temp_root
+from slop_code.common.temp import temporary_directory
 from slop_code.execution.docker_runtime.exec import DockerExecRuntime
 from slop_code.execution.docker_runtime.models import DockerConfig
 from slop_code.execution.docker_runtime.models import DockerEnvironmentSpec
@@ -519,6 +522,37 @@ class TestDockerExecRuntimeIntegration:
             assert isinstance(result, RuntimeResult)
         finally:
             runtime.cleanup()
+
+    def test_named_profile_temp_workspace_is_bind_mountable(
+        self,
+        integration_spec: DockerEnvironmentSpec,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The automatic profile temp root is visible inside Docker."""
+        repository_root = Path(__file__).resolve().parents[3]
+        monkeypatch.delenv(TEMP_ROOT_ENV, raising=False)
+        configured_root = configure_named_profile_temp_root(repository_root)
+
+        with temporary_directory() as temp_dir:
+            working_dir = Path(temp_dir)
+            (working_dir / "host-visible.txt").write_text(
+                "visible-from-container",
+                encoding="utf-8",
+            )
+            runtime = DockerExecRuntime.spawn(
+                environment=integration_spec,
+                working_dir=working_dir,
+                command="cat /workspace/host-visible.txt",
+                disable_setup=True,
+            )
+            try:
+                result = runtime.execute(env={}, stdin=None, timeout=30)
+                assert result.exit_code == 0
+                assert result.stdout.strip() == "visible-from-container"
+            finally:
+                runtime.cleanup()
+
+        assert working_dir.parent == configured_root
 
     def test_execute_captures_stdout(
         self, integration_spec: DockerEnvironmentSpec, tmp_path: Path

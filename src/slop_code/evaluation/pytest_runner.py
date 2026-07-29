@@ -18,6 +18,7 @@ from slop_code.evaluation.report import TestResult
 from slop_code.execution.assets import resolve_static_assets
 from slop_code.execution.models import EnvironmentSpec
 from slop_code.execution.session import Session
+from slop_code.execution.session import cleanup_preserving_primary
 from slop_code.logging import get_logger
 
 logger = get_logger(__name__)
@@ -765,6 +766,7 @@ markers =
             is_agent_infer=False,
         )
 
+        session_error: BaseException | None = None
         try:
             session.prepare()
             workspace_path = session.workspace.working_dir
@@ -811,14 +813,22 @@ markers =
 
             logger.info("Executing pytest")
             runtime = session.exec(command=pytest_cmd)
+            runtime_error: BaseException | None = None
             try:
                 exec_result = runtime.execute(
                     full_env,
                     None,
                     None,
                 )
+            except BaseException as error:  # noqa: BLE001
+                runtime_error = error
+                raise
             finally:
-                runtime.cleanup()
+                cleanup_preserving_primary(
+                    runtime.cleanup,
+                    runtime_error,
+                    phase="pytest runtime",
+                )
 
             logger.info(
                 "Pytest execution complete",
@@ -958,8 +968,15 @@ markers =
 
             return results
 
+        except BaseException as error:  # noqa: BLE001
+            session_error = error
+            raise
         finally:
-            session.cleanup()
+            cleanup_preserving_primary(
+                session.cleanup,
+                session_error,
+                phase="pytest session",
+            )
 
 
 def run_checkpoint_pytest(

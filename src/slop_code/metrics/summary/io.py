@@ -69,6 +69,8 @@ def save_summary_json(
         Path to saved file.
     """
     output_path = run_dir / filename
-    output_path.write_text(json.dumps(summary.model_dump(), indent=2))
+    output_path.write_text(
+        json.dumps(summary.model_dump(), indent=2, allow_nan=False)
+    )
     logger.info("Saved run summary", path=str(output_path))
     return output_path

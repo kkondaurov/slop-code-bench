@@ -29,13 +29,19 @@ import contextlib
 import difflib
 import fnmatch
 import hashlib
+import hmac
 import os
+import shutil
+import stat
 import tarfile
 from collections.abc import Generator
 from collections.abc import Iterable
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from pathlib import PurePosixPath
+from pathlib import PureWindowsPath
+from typing import BinaryIO
 
 from pydantic import BaseModel
 from pydantic import ConfigDict
@@ -49,6 +55,10 @@ from slop_code.logging import get_logger
 logger = get_logger(__name__)
 
 DEFAULT_ARCHIVE_NAME = "slop_code_snapshot"
+SYMLINK_TARGET_TYPE_PAX = "SLOPCODE.symlink_target_type"
+ATIME_NS_PAX = "SLOPCODE.atime_ns"
+MTIME_NS_PAX = "SLOPCODE.mtime_ns"
+ROOT_MEMBER_NAME = "."
 
 IS_WINDOWS = os.name == "nt"
 
@@ -191,9 +201,11 @@ def _walk_candidates(
     cwd: Path,
     ignore_globs: set[str],
     keep_globs: set[str],
-) -> tuple[set[Path], set[Path]]:
+) -> tuple[set[Path], set[Path], set[Path], set[Path]]:
     other_paths: set[Path] = set()
     matched_paths: set[Path] = set()
+    symlink_directory_paths: set[Path] = set()
+    candidate_directory_paths: set[Path] = set()
 
     for root, dirs, files in os.walk(cwd, topdown=True, followlinks=False):
         root_path = Path(root)
@@ -201,9 +213,19 @@ def _walk_candidates(
         # Prune directories early (using trailing slash to match dir globs)
         kept_dirs = []
         for d in list(dirs):
-            rel_dir = (root_path / d).relative_to(cwd).as_posix() + "/"
+            abs_dir = root_path / d
+            rel_path = abs_dir.relative_to(cwd)
+            rel_dir = rel_path.as_posix() + "/"
             if _matches_any(ignore_globs, rel_dir):
                 continue
+            if abs_dir.is_symlink():
+                if not keep_globs or _matches_any(keep_globs, rel_dir):
+                    matched_paths.add(rel_path)
+                    symlink_directory_paths.add(rel_path)
+                else:
+                    other_paths.add(rel_path)
+                continue
+            candidate_directory_paths.add(rel_path)
             kept_dirs.append(d)
         dirs[:] = kept_dirs
 
@@ -220,7 +242,691 @@ def _walk_candidates(
             if not keep_globs or _matches_any(keep_globs, rel_posix):
                 matched_paths.add(rel_path)
 
-    return matched_paths, other_paths
+    if keep_globs:
+        directory_paths = {
+            path
+            for path in candidate_directory_paths
+            if _matches_any(keep_globs, f"{path.as_posix()}/")
+        }
+        for matched_path in matched_paths:
+            for parent in matched_path.parents:
+                if parent == Path():
+                    break
+                if parent in candidate_directory_paths:
+                    directory_paths.add(parent)
+        other_paths.update(candidate_directory_paths - directory_paths)
+    else:
+        directory_paths = candidate_directory_paths
+
+    return (
+        matched_paths,
+        other_paths,
+        symlink_directory_paths,
+        directory_paths,
+    )
+
+
+def _safe_archive_member_path(name: str) -> Path:
+    """Validate and convert an archive member path without host traversal."""
+    pure_path = PurePosixPath(name)
+    windows_path = PureWindowsPath(name)
+    if (
+        pure_path.is_absolute()
+        or not pure_path.parts
+        or "\\" in name
+        or windows_path.is_absolute()
+        or bool(windows_path.drive)
+    ):
+        raise ExecutionError(f"Unsafe snapshot archive member: {name!r}")
+    if any(part in {"", ".", ".."} for part in pure_path.parts):
+        raise ExecutionError(f"Unsafe snapshot archive member: {name!r}")
+    return Path(*pure_path.parts)
+
+
+def _safe_relative_symlink_target(link_path: Path, target: str) -> str:
+    """Reject absolute or workspace-escaping symlink targets."""
+    pure_target = PurePosixPath(target)
+    windows_target = PureWindowsPath(target)
+    if (
+        pure_target.is_absolute()
+        or not pure_target.parts
+        or "\\" in target
+        or windows_target.is_absolute()
+        or bool(windows_target.drive)
+    ):
+        raise ExecutionError(
+            f"Unsafe snapshot symlink target for {link_path}: {target!r}"
+        )
+
+    resolved_parts = list(PurePosixPath(link_path.as_posix()).parent.parts)
+    for part in pure_target.parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not resolved_parts:
+                raise ExecutionError(
+                    "Snapshot symlink escapes the workspace: "
+                    f"{link_path} -> {target}"
+                )
+            resolved_parts.pop()
+            continue
+        resolved_parts.append(part)
+    return target
+
+
+def _ensure_safe_output_parent(target_dir: Path, out_path: Path) -> None:
+    """Create archive parents while refusing traversal through symlinks."""
+    relative = out_path.relative_to(target_dir)
+    current = target_dir
+    for part in relative.parts[:-1]:
+        current /= part
+        if current.is_symlink():
+            raise ExecutionError(
+                f"Snapshot extraction parent is a symlink: {current}"
+            )
+        current.mkdir(exist_ok=True)
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
+    """Return metadata that changes when a captured path is replaced/mutated."""
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+@contextlib.contextmanager
+def _open_parent_directory_fd(
+    cwd: Path,
+    rel_path: Path,
+) -> Generator[int | None, None, None]:
+    """Open every parent with no-follow semantics when the platform supports it."""
+    supports_dir_fd = os.open in os.supports_dir_fd
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if not supports_dir_fd or not no_follow or not directory:
+        current = cwd
+        if current.is_symlink():
+            raise ExecutionError(f"Snapshot root is a symlink: {cwd}")
+        for part in rel_path.parts[:-1]:
+            current /= part
+            if current.is_symlink():
+                raise ExecutionError(
+                    f"Snapshot path parent is a symlink: {current}"
+                )
+        yield None
+        return
+
+    opened: list[int] = []
+    flags = os.O_RDONLY | no_follow | directory | getattr(os, "O_CLOEXEC", 0)
+    try:
+        current_fd = os.open(cwd, flags)
+        opened.append(current_fd)
+        for part in rel_path.parts[:-1]:
+            current_fd = os.open(part, flags, dir_fd=current_fd)
+            opened.append(current_fd)
+        yield current_fd
+    except OSError as exc:
+        raise ExecutionError(
+            f"Snapshot path changed or traverses a symlink: {rel_path}"
+        ) from exc
+    finally:
+        for descriptor in reversed(opened):
+            os.close(descriptor)
+
+
+@contextlib.contextmanager
+def _open_regular_file_no_follow(
+    cwd: Path,
+    rel_path: Path,
+) -> Generator[tuple[BinaryIO, os.stat_result], None, None]:
+    """Pin a regular file descriptor without following the final component."""
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    if no_follow:
+        flags |= no_follow
+
+    with _open_parent_directory_fd(cwd, rel_path) as parent_fd:
+        try:
+            if parent_fd is None:
+                descriptor = os.open(cwd / rel_path, flags)
+            else:
+                descriptor = os.open(
+                    rel_path.name,
+                    flags,
+                    dir_fd=parent_fd,
+                )
+        except OSError as exc:
+            raise ExecutionError(
+                f"Snapshot file changed or became a symlink: {rel_path}"
+            ) from exc
+
+        try:
+            source_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(source_stat.st_mode):
+                raise ExecutionError(
+                    f"Unsupported snapshot file type: {rel_path}"
+                )
+            with os.fdopen(descriptor, "rb", closefd=False) as source:
+                yield source, source_stat
+        finally:
+            os.close(descriptor)
+
+
+@contextlib.contextmanager
+def _open_directory_no_follow(
+    cwd: Path,
+    rel_path: Path,
+) -> Generator[tuple[int | None, os.stat_result], None, None]:
+    """Pin a real directory without following its final component."""
+    no_follow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if os.open not in os.supports_dir_fd or not no_follow or not directory:
+        path = cwd / rel_path
+        try:
+            before = path.lstat()
+        except OSError as exc:
+            raise ExecutionError(
+                f"Snapshot directory changed or became a symlink: {rel_path}"
+            ) from exc
+        if not stat.S_ISDIR(before.st_mode):
+            raise ExecutionError(
+                f"Unsupported snapshot directory type: {rel_path}"
+            )
+        yield None, before
+        try:
+            after = path.lstat()
+        except OSError as exc:
+            raise ExecutionError(
+                f"Snapshot directory changed during capture: {rel_path}"
+            ) from exc
+        if _stat_identity(before) != _stat_identity(after):
+            raise ExecutionError(
+                f"Snapshot directory changed during capture: {rel_path}"
+            )
+        return
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | directory
+        | no_follow
+    )
+    with _open_parent_directory_fd(cwd, rel_path) as parent_fd:
+        try:
+            if parent_fd is None:
+                descriptor = os.open(cwd / rel_path, flags)
+            else:
+                descriptor = os.open(
+                    rel_path.name,
+                    flags,
+                    dir_fd=parent_fd,
+                )
+        except OSError as exc:
+            raise ExecutionError(
+                f"Snapshot directory changed or became a symlink: {rel_path}"
+            ) from exc
+
+        try:
+            source_stat = os.fstat(descriptor)
+            if not stat.S_ISDIR(source_stat.st_mode):
+                raise ExecutionError(
+                    f"Unsupported snapshot directory type: {rel_path}"
+                )
+            yield descriptor, source_stat
+            after = os.fstat(descriptor)
+            if _stat_identity(source_stat) != _stat_identity(after):
+                raise ExecutionError(
+                    f"Snapshot directory changed during capture: {rel_path}"
+                )
+        finally:
+            os.close(descriptor)
+
+
+def _read_symlink_no_follow(
+    cwd: Path,
+    rel_path: Path,
+) -> tuple[str, os.stat_result]:
+    """Read a symlink through a pinned parent and reject concurrent replacement."""
+    with _open_parent_directory_fd(cwd, rel_path) as parent_fd:
+        try:
+            if parent_fd is None:
+                before = (cwd / rel_path).lstat()
+                target = str((cwd / rel_path).readlink())
+                after = (cwd / rel_path).lstat()
+            else:
+                before = os.stat(
+                    rel_path.name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+                target = os.readlink(rel_path.name, dir_fd=parent_fd)
+                after = os.stat(
+                    rel_path.name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+        except OSError as exc:
+            raise ExecutionError(
+                f"Snapshot symlink changed during capture: {rel_path}"
+            ) from exc
+    if not stat.S_ISLNK(before.st_mode) or (
+        _stat_identity(before) != _stat_identity(after)
+    ):
+        raise ExecutionError(
+            f"Snapshot symlink changed during capture: {rel_path}"
+        )
+    return target, before
+
+
+def _tar_info_from_stat(
+    rel_path: Path,
+    source_stat: os.stat_result,
+    *,
+    symlink_target: str | None = None,
+    symlink_target_is_directory: bool = False,
+) -> tarfile.TarInfo:
+    """Build archive metadata from descriptor-pinned filesystem metadata."""
+    info = tarfile.TarInfo(rel_path.as_posix())
+    info.mode = stat.S_IMODE(source_stat.st_mode)
+    info.uid = source_stat.st_uid
+    info.gid = source_stat.st_gid
+    info.mtime = source_stat.st_mtime
+    info.pax_headers[ATIME_NS_PAX] = str(source_stat.st_atime_ns)
+    info.pax_headers[MTIME_NS_PAX] = str(source_stat.st_mtime_ns)
+    if stat.S_ISDIR(source_stat.st_mode):
+        info.type = tarfile.DIRTYPE
+        info.size = 0
+    elif symlink_target is None:
+        info.type = tarfile.REGTYPE
+        info.size = source_stat.st_size
+    else:
+        info.type = tarfile.SYMTYPE
+        info.size = 0
+        info.linkname = symlink_target
+        info.pax_headers[SYMLINK_TARGET_TYPE_PAX] = (
+            "directory" if symlink_target_is_directory else "file"
+        )
+    return info
+
+
+def _prepare_safe_extraction_root(target_dir: Path) -> Path:
+    """Create an extraction root without accepting symlinked components."""
+    absolute = target_dir.absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        try:
+            current_stat = current.lstat()
+        except FileNotFoundError:
+            current.mkdir()
+            current_stat = current.lstat()
+        if stat.S_ISLNK(current_stat.st_mode):
+            raise ExecutionError(
+                f"Snapshot extraction root traverses a symlink: {current}"
+            )
+        if not stat.S_ISDIR(current_stat.st_mode):
+            raise ExecutionError(
+                f"Snapshot extraction root is not a directory: {current}"
+            )
+    return absolute
+
+
+def _supports_descriptor_safe_extraction() -> bool:
+    """Return whether the host exposes the no-follow dir-fd primitives used."""
+    return bool(
+        getattr(os, "O_NOFOLLOW", 0)
+        and getattr(os, "O_DIRECTORY", 0)
+        and os.open in os.supports_dir_fd
+        and os.mkdir in os.supports_dir_fd
+        and os.stat in os.supports_dir_fd
+        and os.unlink in os.supports_dir_fd
+        and os.symlink in os.supports_dir_fd
+        and os.utime in os.supports_dir_fd
+        and os.utime in os.supports_follow_symlinks
+    )
+
+
+@contextlib.contextmanager
+def _open_safe_extraction_root(
+    target_dir: Path,
+) -> Generator[tuple[Path, int | None], None, None]:
+    """Create and pin an extraction root without traversing symlinks."""
+    absolute = Path(os.path.abspath(target_dir))  # noqa: PTH100
+    if not _supports_descriptor_safe_extraction():
+        yield _prepare_safe_extraction_root(absolute), None
+        return
+
+    flags = (
+        os.O_RDONLY
+        | os.O_NOFOLLOW
+        | os.O_DIRECTORY
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    current_fd: int | None = None
+    try:
+        current_fd = os.open(absolute.anchor, flags)
+        for part in absolute.parts[1:]:
+            if part in {"", ".", ".."}:
+                raise ExecutionError(
+                    f"Unsafe snapshot extraction root component: {part!r}"
+                )
+            with contextlib.suppress(FileExistsError):
+                os.mkdir(part, dir_fd=current_fd)
+            try:
+                next_fd = os.open(part, flags, dir_fd=current_fd)
+            except OSError as exc:
+                raise ExecutionError(
+                    "Snapshot extraction root changed or traverses a symlink: "
+                    f"{absolute}"
+                ) from exc
+            os.close(current_fd)
+            current_fd = next_fd
+        yield absolute, current_fd
+    finally:
+        if current_fd is not None:
+            os.close(current_fd)
+
+
+@contextlib.contextmanager
+def _open_safe_output_parent(
+    root_fd: int,
+    relative_path: Path,
+) -> Generator[int, None, None]:
+    """Open/create an archive member's parent beneath a pinned root."""
+    flags = (
+        os.O_RDONLY
+        | os.O_NOFOLLOW
+        | os.O_DIRECTORY
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    current_fd = os.dup(root_fd)
+    try:
+        for part in relative_path.parts[:-1]:
+            with contextlib.suppress(FileExistsError):
+                os.mkdir(part, dir_fd=current_fd)
+            try:
+                next_fd = os.open(part, flags, dir_fd=current_fd)
+            except OSError as exc:
+                raise ExecutionError(
+                    "Snapshot extraction parent changed or is a symlink: "
+                    f"{relative_path.parent}"
+                ) from exc
+            os.close(current_fd)
+            current_fd = next_fd
+        yield current_fd
+    finally:
+        os.close(current_fd)
+
+
+def _remove_existing_output(parent_fd: int, name: str) -> None:
+    """Unlink a non-directory final component relative to a pinned parent."""
+    try:
+        existing = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return
+    if stat.S_ISDIR(existing.st_mode):
+        raise ExecutionError(
+            f"Snapshot archive member conflicts with directory: {name}"
+        )
+    # A concurrent removal is benign. Creation below still uses O_EXCL.
+    with contextlib.suppress(FileNotFoundError):
+        os.unlink(name, dir_fd=parent_fd)
+
+
+def _parse_exact_integer(
+    encoded: str,
+    *,
+    field: str,
+    path: str,
+) -> int:
+    """Parse canonical integer metadata without accepting ambiguous text."""
+    try:
+        value = int(encoded)
+    except (TypeError, ValueError) as exc:
+        raise ExecutionError(
+            f"Invalid snapshot {field} metadata for {path}: {encoded!r}"
+        ) from exc
+    if str(value) != encoded:
+        raise ExecutionError(
+            f"Invalid snapshot {field} metadata for {path}: {encoded!r}"
+        )
+    return value
+
+
+def _member_mtime_ns(member: tarfile.TarInfo) -> int:
+    """Read the exact captured mtime, including nanoseconds."""
+    encoded = member.pax_headers.get(MTIME_NS_PAX)
+    if encoded is None:
+        return int(float(member.mtime) * 1_000_000_000)
+    return _parse_exact_integer(
+        encoded,
+        field="mtime",
+        path=member.name,
+    )
+
+
+def _member_atime_ns(member: tarfile.TarInfo) -> int:
+    """Read exact captured atime, falling back for legacy snapshots."""
+    encoded = member.pax_headers.get(ATIME_NS_PAX)
+    if encoded is None:
+        return _member_mtime_ns(member)
+    return _parse_exact_integer(
+        encoded,
+        field="atime",
+        path=member.name,
+    )
+
+
+@contextlib.contextmanager
+def _open_verified_archive(
+    archive_path: Path,
+    expected_checksum: str,
+) -> Generator[BinaryIO, None, None]:
+    """Verify an archive and parse it through the same open descriptor."""
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(archive_path, flags)
+    except OSError as exc:
+        raise ExecutionError(
+            f"Could not safely open snapshot archive: {archive_path}"
+        ) from exc
+
+    try:
+        source_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(source_stat.st_mode):
+            raise ExecutionError(
+                f"Snapshot archive is not a regular file: {archive_path}"
+            )
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            digest = hashlib.md5(usedforsecurity=False)
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+            after = os.fstat(descriptor)
+            if _stat_identity(source_stat) != _stat_identity(after):
+                raise ExecutionError(
+                    f"Snapshot archive changed while verifying: {archive_path}"
+                )
+            actual_checksum = digest.hexdigest()
+            if not hmac.compare_digest(actual_checksum, expected_checksum):
+                raise ExecutionError(
+                    "Snapshot archive checksum mismatch: "
+                    f"expected {expected_checksum}, got {actual_checksum}"
+                )
+            source.seek(0)
+            yield source
+    finally:
+        os.close(descriptor)
+
+
+def _apply_descriptor_metadata(
+    descriptor: int,
+    member: tarfile.TarInfo,
+    *,
+    uid: int | None,
+    gid: int | None,
+) -> None:
+    """Restore owner, mode, and exact mtime through a pinned descriptor."""
+    if uid is not None and gid is not None:
+        os.fchown(descriptor, uid, gid)
+    os.fchmod(descriptor, member.mode & 0o777)
+    atime_ns = _member_atime_ns(member)
+    mtime_ns = _member_mtime_ns(member)
+    os.utime(descriptor, ns=(atime_ns, mtime_ns))
+
+
+def _ensure_directory_member_at(
+    root_fd: int,
+    relative_path: Path,
+) -> None:
+    """Create one real directory beneath a pinned extraction root."""
+    with _open_safe_output_parent(root_fd, relative_path) as parent_fd:
+        name = relative_path.name
+        with contextlib.suppress(FileExistsError):
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+        try:
+            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise ExecutionError(
+                f"Snapshot directory changed while creating: {relative_path}"
+            ) from exc
+        if not stat.S_ISDIR(current.st_mode):
+            raise ExecutionError(
+                f"Snapshot directory conflicts with non-directory: {relative_path}"
+            )
+
+
+@contextlib.contextmanager
+def _open_safe_directory_at(
+    root_fd: int,
+    relative_path: Path,
+) -> Generator[int, None, None]:
+    """Open an extracted directory without following any path component."""
+    flags = (
+        os.O_RDONLY
+        | os.O_NOFOLLOW
+        | os.O_DIRECTORY
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    with _open_safe_output_parent(root_fd, relative_path) as parent_fd:
+        try:
+            descriptor = os.open(
+                relative_path.name,
+                flags,
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            raise ExecutionError(
+                f"Snapshot directory changed before metadata restore: "
+                f"{relative_path}"
+            ) from exc
+        try:
+            yield descriptor
+        finally:
+            os.close(descriptor)
+
+
+def _write_regular_member_at(
+    parent_fd: int,
+    member: tarfile.TarInfo,
+    source: BinaryIO,
+    *,
+    uid: int | None,
+    gid: int | None,
+) -> None:
+    """Write a regular member without reopening any pathname ancestor."""
+    name = Path(member.name).name
+    _remove_existing_output(parent_fd, name)
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        descriptor = os.open(name, flags, 0o600, dir_fd=parent_fd)
+    except OSError as exc:
+        raise ExecutionError(
+            f"Snapshot output changed while creating: {member.name}"
+        ) from exc
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as output:
+            shutil.copyfileobj(source, output, length=1024 * 1024)
+        _apply_descriptor_metadata(
+            descriptor,
+            member,
+            uid=uid,
+            gid=gid,
+        )
+        if uid is not None and gid is not None:
+            os.fchown(parent_fd, uid, gid)
+    finally:
+        os.close(descriptor)
+
+
+def _write_symlink_member_at(
+    parent_fd: int,
+    member: tarfile.TarInfo,
+    target: str,
+    *,
+    target_is_directory: bool,
+    uid: int | None,
+    gid: int | None,
+) -> None:
+    """Write a symlink relative to a pinned parent directory."""
+    name = Path(member.name).name
+    _remove_existing_output(parent_fd, name)
+    try:
+        os.symlink(
+            target,
+            name,
+            target_is_directory=target_is_directory,
+            dir_fd=parent_fd,
+        )
+    except OSError as exc:
+        raise ExecutionError(
+            f"Snapshot output changed while linking: {member.name}"
+        ) from exc
+    if uid is not None and gid is not None:
+        os.chown(
+            name,
+            uid,
+            gid,
+            dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        os.fchown(parent_fd, uid, gid)
+    atime_ns = _member_atime_ns(member)
+    mtime_ns = _member_mtime_ns(member)
+    os.utime(
+        name,
+        ns=(atime_ns, mtime_ns),
+        dir_fd=parent_fd,
+        follow_symlinks=False,
+    )
+
+
+def _symlink_target_is_directory(member: tarfile.TarInfo) -> bool:
+    """Read portable symlink target-type metadata from a snapshot member."""
+    target_type = member.pax_headers.get(SYMLINK_TARGET_TYPE_PAX)
+    if target_type in {None, "file"}:
+        return False
+    if target_type == "directory":
+        return True
+    raise ExecutionError(
+        "Unsupported snapshot symlink target type: "
+        f"{member.name} -> {target_type!r}"
+    )
 
 
 class Snapshot(BaseModel):
@@ -244,6 +950,7 @@ class Snapshot(BaseModel):
     env: dict[str, str] = Field(default_factory=dict)
     matched_paths: set[Path] = Field(default_factory=set)
     other_paths: set[Path] = Field(default_factory=set)
+    owns_archive_parent: bool = False
 
     def __repr__(self) -> str:
         return (
@@ -298,10 +1005,16 @@ class Snapshot(BaseModel):
             ".venv/*",
             "**/.DS_Store",
         }
+        root_stat = cwd.stat(follow_symlinks=False)
+        if not stat.S_ISDIR(root_stat.st_mode):
+            raise ExecutionError(f"Snapshot root is not a directory: {cwd}")
 
-        matched_paths, other_paths = _walk_candidates(
-            cwd, ignore_globs, keep_globs or set()
-        )
+        (
+            matched_paths,
+            other_paths,
+            symlink_directory_paths,
+            directory_paths,
+        ) = _walk_candidates(cwd, ignore_globs, keep_globs or set())
         logger.debug(
             "Creating archive",
             num_matched_paths=len(matched_paths),
@@ -310,14 +1023,80 @@ class Snapshot(BaseModel):
         )
 
         archive_path.parent.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(str(archive_path), mode=tar_mode) as tf:  # type: ignore
-            for rel_path in matched_paths:
-                abs_path = cwd / rel_path
-                tf.add(
-                    abs_path,
-                    arcname=rel_path.as_posix(),
-                    recursive=False,
+        try:
+            with tarfile.open(
+                str(archive_path),
+                mode=tar_mode,  # type: ignore[arg-type]
+                format=tarfile.PAX_FORMAT,
+            ) as tf:
+                tf.addfile(
+                    _tar_info_from_stat(Path(ROOT_MEMBER_NAME), root_stat)
                 )
+                for rel_path in sorted(
+                    matched_paths | directory_paths,
+                    key=lambda path: path.as_posix(),
+                ):
+                    abs_path = cwd / rel_path
+                    try:
+                        candidate_stat = abs_path.lstat()
+                    except OSError as exc:
+                        raise ExecutionError(
+                            f"Snapshot path disappeared during capture: {rel_path}"
+                        ) from exc
+
+                    if rel_path in directory_paths:
+                        if not stat.S_ISDIR(candidate_stat.st_mode):
+                            raise ExecutionError(
+                                "Snapshot directory changed during capture: "
+                                f"{rel_path}"
+                            )
+                        with _open_directory_no_follow(
+                            cwd,
+                            rel_path,
+                        ) as (_, directory_stat):
+                            tf.addfile(
+                                _tar_info_from_stat(rel_path, directory_stat)
+                            )
+                        continue
+                    if stat.S_ISLNK(candidate_stat.st_mode):
+                        target, symlink_stat = _read_symlink_no_follow(
+                            cwd,
+                            rel_path,
+                        )
+                        _safe_relative_symlink_target(rel_path, target)
+                        tf.addfile(
+                            _tar_info_from_stat(
+                                rel_path,
+                                symlink_stat,
+                                symlink_target=target,
+                                symlink_target_is_directory=(
+                                    rel_path in symlink_directory_paths
+                                ),
+                            )
+                        )
+                        continue
+                    if not stat.S_ISREG(candidate_stat.st_mode):
+                        raise ExecutionError(
+                            f"Unsupported snapshot file type: {rel_path}"
+                        )
+
+                    with _open_regular_file_no_follow(
+                        cwd,
+                        rel_path,
+                    ) as (source, source_stat):
+                        tf.addfile(
+                            _tar_info_from_stat(rel_path, source_stat),
+                            source,
+                        )
+                        after = os.fstat(source.fileno())
+                        if _stat_identity(source_stat) != _stat_identity(after):
+                            raise ExecutionError(
+                                "Snapshot file changed during capture: "
+                                f"{rel_path}"
+                            )
+        except BaseException:
+            archive_path.unlink(missing_ok=True)
+            raise
 
         logger.debug(
             "Calculating checksum",
@@ -325,7 +1104,7 @@ class Snapshot(BaseModel):
             size=f"{archive_path.stat().st_size / (1024**2):.4f} MB",
         )
 
-        hash_md5 = hashlib.md5()
+        hash_md5 = hashlib.md5(usedforsecurity=False)
         with archive_path.open("rb") as f:
             for chunk in iter(lambda: f.read(4096), b""):
                 hash_md5.update(chunk)
@@ -374,13 +1153,20 @@ class Snapshot(BaseModel):
             verbose=True,
         )
 
-        with tarfile.open(self.archive, read_mode) as tf:  # type: ignore[arg-type]
+        with (
+            _open_verified_archive(self.archive, self.checksum) as source,
+            tarfile.open(  # type: ignore[call-overload]
+                fileobj=source,
+                mode=read_mode,
+            ) as tf,
+        ):
             for member in tf.getmembers():
                 if member.isfile():
+                    path = _safe_archive_member_path(member.name)
                     extracted = tf.extractfile(member)
                     if extracted is not None:
                         file_count += 1
-                        yield Path(member.name), extracted.read()
+                        yield path, extracted.read()
 
         logger.debug(
             "Extracted file contents",
@@ -408,24 +1194,225 @@ class Snapshot(BaseModel):
             verbose=True,
         )
 
-        # get your target uid/gid (e.g., from env vars set by Docker)
+        # Get the target uid/gid (e.g. from env vars set by Docker).
+        uid: int | None = None
+        gid: int | None = None
         if not IS_WINDOWS:
             uid = int(os.environ.get("HUID", os.getuid()))
             gid = int(os.environ.get("HGID", os.getgid()))
 
         file_count = 0
-        for path, data in self._extract_contents():
-            out_path = target_dir / path
-            out_path.parent.mkdir(parents=True, exist_ok=True)
+        directory_members: list[tuple[Path, tarfile.TarInfo]] = []
+        read_mode = _tar_read_mode(self.compression)
+        with (
+            _open_verified_archive(self.archive, self.checksum) as source,
+            _open_safe_extraction_root(target_dir) as (
+                target_dir,
+                root_fd,
+            ),
+            tarfile.open(  # type: ignore[call-overload]
+                fileobj=source,
+                mode=read_mode,
+            ) as tf,
+        ):
+            root_member: tarfile.TarInfo | None = None
+            for member in tf.getmembers():
+                if member.name in {ROOT_MEMBER_NAME, f"{ROOT_MEMBER_NAME}/"}:
+                    if root_member is not None or not member.isdir():
+                        raise ExecutionError(
+                            "Invalid snapshot workspace-root metadata member"
+                        )
+                    root_member = member
+                    continue
+                path = _safe_archive_member_path(member.name)
 
-            out_path.write_bytes(data)
-            if not IS_WINDOWS:
-                os.chown(out_path, uid, gid)
-                os.chown(out_path.parent, uid, gid)
-            file_count += 1
+                if member.isdir():
+                    if root_fd is not None:
+                        _ensure_directory_member_at(root_fd, path)
+                    else:
+                        out_path = target_dir / path
+                        _ensure_safe_output_parent(target_dir, out_path)
+                        try:
+                            current = out_path.lstat()
+                        except FileNotFoundError:
+                            out_path.mkdir(mode=0o700)
+                            current = out_path.lstat()
+                        if not stat.S_ISDIR(current.st_mode):
+                            raise ExecutionError(
+                                "Snapshot directory conflicts with "
+                                f"non-directory: {out_path}"
+                            )
+                    directory_members.append((path, member))
+                elif member.isfile():
+                    extracted = tf.extractfile(member)
+                    if extracted is None:
+                        raise ExecutionError(
+                            f"Could not read snapshot member: {member.name}"
+                        )
+                    if root_fd is not None:
+                        with _open_safe_output_parent(root_fd, path) as parent_fd:
+                            _write_regular_member_at(
+                                parent_fd,
+                                member,
+                                extracted,
+                                uid=uid,
+                                gid=gid,
+                            )
+                    else:
+                        out_path = target_dir / path
+                        _ensure_safe_output_parent(target_dir, out_path)
+                        if out_path.is_symlink() or out_path.exists():
+                            if out_path.is_dir() and not out_path.is_symlink():
+                                raise ExecutionError(
+                                    "Snapshot file conflicts with directory: "
+                                    f"{out_path}"
+                                )
+                            out_path.unlink()
+                        try:
+                            with out_path.open("xb") as output:
+                                shutil.copyfileobj(
+                                    extracted,
+                                    output,
+                                    length=1024 * 1024,
+                                )
+                        except OSError as exc:
+                            raise ExecutionError(
+                                "Snapshot output changed while creating: "
+                                f"{member.name}"
+                            ) from exc
+                        if uid is not None and gid is not None:
+                            os.chown(
+                                out_path,
+                                uid,
+                                gid,
+                                follow_symlinks=False,
+                            )
+                            os.chown(out_path.parent, uid, gid)
+                        out_path.chmod(member.mode & 0o777)
+                        atime_ns = _member_atime_ns(member)
+                        mtime_ns = _member_mtime_ns(member)
+                        os.utime(
+                            out_path,
+                            ns=(atime_ns, mtime_ns),
+                            follow_symlinks=False,
+                        )
+                elif member.issym():
+                    target = _safe_relative_symlink_target(
+                        path,
+                        member.linkname,
+                    )
+                    target_is_directory = _symlink_target_is_directory(member)
+                    if root_fd is not None:
+                        with _open_safe_output_parent(root_fd, path) as parent_fd:
+                            _write_symlink_member_at(
+                                parent_fd,
+                                member,
+                                target,
+                                target_is_directory=target_is_directory,
+                                uid=uid,
+                                gid=gid,
+                            )
+                    else:
+                        out_path = target_dir / path
+                        _ensure_safe_output_parent(target_dir, out_path)
+                        if out_path.is_symlink() or out_path.exists():
+                            if out_path.is_dir() and not out_path.is_symlink():
+                                raise ExecutionError(
+                                    "Snapshot symlink conflicts with directory: "
+                                    f"{out_path}"
+                                )
+                            out_path.unlink()
+                        out_path.symlink_to(
+                            target,
+                            target_is_directory=target_is_directory,
+                        )
+                        if uid is not None and gid is not None:
+                            os.chown(
+                                out_path,
+                                uid,
+                                gid,
+                                follow_symlinks=False,
+                            )
+                            os.chown(out_path.parent, uid, gid)
+                        atime_ns = _member_atime_ns(member)
+                        mtime_ns = _member_mtime_ns(member)
+                        os.utime(
+                            out_path,
+                            ns=(atime_ns, mtime_ns),
+                            follow_symlinks=False,
+                        )
+                else:
+                    raise ExecutionError(
+                        "Unsupported snapshot archive entry type: "
+                        f"{member.name}"
+                    )
 
-        if not IS_WINDOWS:
-            os.chown(target_dir, uid, gid)
+                file_count += 1
+
+            for path, member in sorted(
+                directory_members,
+                key=lambda item: len(item[0].parts),
+                reverse=True,
+            ):
+                if root_fd is not None:
+                    with _open_safe_directory_at(root_fd, path) as descriptor:
+                        _apply_descriptor_metadata(
+                            descriptor,
+                            member,
+                            uid=uid,
+                            gid=gid,
+                        )
+                else:
+                    out_path = target_dir / path
+                    _ensure_safe_output_parent(target_dir, out_path)
+                    try:
+                        current = out_path.lstat()
+                    except OSError as exc:
+                        raise ExecutionError(
+                            "Snapshot directory changed before metadata "
+                            f"restore: {out_path}"
+                        ) from exc
+                    if not stat.S_ISDIR(current.st_mode):
+                        raise ExecutionError(
+                            "Snapshot directory changed before metadata "
+                            f"restore: {out_path}"
+                        )
+                    if uid is not None and gid is not None:
+                        os.chown(out_path, uid, gid, follow_symlinks=False)
+                    out_path.chmod(member.mode & 0o777)
+                    atime_ns = _member_atime_ns(member)
+                    mtime_ns = _member_mtime_ns(member)
+                    os.utime(
+                        out_path,
+                        ns=(atime_ns, mtime_ns),
+                        follow_symlinks=False,
+                    )
+
+            if root_member is not None:
+                if root_fd is not None:
+                    _apply_descriptor_metadata(
+                        root_fd,
+                        root_member,
+                        uid=uid,
+                        gid=gid,
+                    )
+                else:
+                    if uid is not None and gid is not None:
+                        os.chown(target_dir, uid, gid)
+                    target_dir.chmod(root_member.mode & 0o777)
+                    os.utime(
+                        target_dir,
+                        ns=(
+                            _member_atime_ns(root_member),
+                            _member_mtime_ns(root_member),
+                        ),
+                        follow_symlinks=False,
+                    )
+            elif uid is not None and gid is not None:
+                if root_fd is not None:
+                    os.fchown(root_fd, uid, gid)
+                else:
+                    os.chown(target_dir, uid, gid)
 
         logger.debug(
             "Extracted snapshot to directory",
@@ -481,13 +1468,17 @@ class Snapshot(BaseModel):
             has_static_assets=bool(static_assets),
             verbose=True,
         )
-        return cls.from_directory(
+        owns_archive_parent = env_spec.snapshot.archive_save_dir is None
+        snapshot = cls.from_directory(
             cwd=cwd,
             env=env_spec.get_full_env(env or {}),
             compression=env_spec.snapshot.compression,
             save_path=env_spec.get_archive_save_dir(),
             ignore_globs=env_spec.get_ignore_globs(static_assets),
             keep_globs=env_spec.snapshot.keep_globs,
+        )
+        return snapshot.model_copy(
+            update={"owns_archive_parent": owns_archive_parent}
         )
 
     def cleanup(self) -> None:
@@ -498,7 +1489,10 @@ class Snapshot(BaseModel):
             snapshot=self.checksum[:8],
             archive=self.archive,
         )
-        self.archive.unlink()
+        self.archive.unlink(missing_ok=True)
+        if self.owns_archive_parent:
+            with contextlib.suppress(OSError):
+                self.archive.parent.rmdir()
 
 
 class FileChangeType(str, Enum):

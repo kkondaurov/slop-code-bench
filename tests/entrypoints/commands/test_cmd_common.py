@@ -13,6 +13,50 @@ from slop_code.execution import docker_runtime
 from slop_code.execution import local_streaming
 
 
+def test_build_agent_docker_keys_agent_image_to_base_image() -> None:
+    agent_config = MagicMock()
+    agent_config.get_image.return_value = "codex-test-python3.12"
+    agent_config.get_docker_file.return_value = "FROM slop-code:python3.12"
+    environment = MagicMock(spec=docker_runtime.DockerEnvironmentSpec)
+    environment.name = "python3.12"
+    environment.get_base_image.return_value = "slop-code:python3.12"
+    client = MagicMock()
+    base_image = MagicMock()
+    base_image.id = "sha256:base-v2"
+
+    with (
+        patch("docker.from_env", return_value=client),
+        patch(
+            "slop_code.entrypoints.commands.common."
+            "docker_runtime.build_base_image",
+            return_value=base_image,
+        ) as build_base,
+        patch(
+            "slop_code.entrypoints.commands.common."
+            "docker_runtime.build_image_from_str",
+        ) as build_agent,
+    ):
+        image_name = common.build_agent_docker(
+            agent_config,
+            environment,
+        )
+
+    assert image_name == "slop-code:codex-test-python3.12"
+    build_base.assert_called_once_with(
+        client=client,
+        environment_spec=environment,
+        force_build=False,
+    )
+    build_agent.assert_called_once_with(
+        client=client,
+        image_name=image_name,
+        dockerfile="FROM slop-code:python3.12",
+        force_build=False,
+        parent_image_id="sha256:base-v2",
+    )
+    client.close.assert_called_once_with()
+
+
 def test_validate_rubric_options_success():
     """Test validate_rubric_options with valid inputs."""
     # Both None - valid

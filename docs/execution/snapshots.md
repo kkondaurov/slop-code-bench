@@ -38,10 +38,25 @@ print(snapshot.timestamp)  # When snapshot was created
 **Key features:**
 - Compressed tar archives (`gz`, `bz2`, `xz`, or uncompressed)
 - Glob-based file filtering (include/exclude patterns)
-- MD5 checksums for integrity verification
+- MD5 checksums verified before any archive is parsed
 - Environment variable capture
 - Metadata about matched/ignored paths
 - Text-focused diffing (non-decodable files are skipped rather than treated as binary)
+
+### Carry-forward fidelity boundary
+
+Current snapshots preserve regular-file contents, empty directories, safe
+relative symlinks, ordinary read/write/execute modes, and nanosecond access and
+modification times. Workspace-root mode and timestamps are stored explicitly
+and restored after all child entries, so extraction itself does not replace the
+captured root times with newly-created-directory times.
+
+This is intentionally not a general-purpose filesystem image. Ownership is
+mapped to the configured host UID/GID during extraction. ACLs, extended
+attributes, birth/creation time, filesystem flags, special permission bits,
+and hardlink inode identity are not preserved. Snapshot capture assumes the
+benchmark has quiesced its managed runtimes; it is not an atomic filesystem
+snapshot against an unrelated hostile host process mutating the same tree.
 
 ### Snapshot Diff
 
@@ -427,4 +442,3 @@ with session as active:
 - [Environment Specs](environment_specs.md) – Configuration shared by all runtimes
 - [Session Lifecycle](manager.md) – Workspace orchestration and runtime spawning
 - [Extending Execution](extending.md) – Custom execution backends
-

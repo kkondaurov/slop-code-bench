@@ -1,0 +1,54 @@
+profile: paper-v2-reference
+agent: codex-0.124.0
+environment: docker-python3.12-uv-scb-v2
+prompt: just-solve
+
+model:
+  provider: codex_auth
+  name: gpt-5.5
+
+thinking: high
+pass_policy: any-case
+one_shot:
+  enabled: false
+
+problems:
+  - cfgpipe
+  - circuit_eval
+  - code_search
+  - dag_execution
+  - database_migration
+  - datagate
+  - dynamic_buffer
+  - dynamic_config_service_api
+  - env_manager
+  - etl_pipeline
+  - eve_industry
+  - eve_jump_planner
+  - eve_market_tools
+  - eve_route_planner
+  - execution_server
+  - file_backup
+  - file_merger
+  - file_query_tool
+  - forge
+  - l2m
+  - layered_config_synthesizer
+  - log_query
+  - meshctl
+  - metric_transform_lang
+  - migrate_configs
+  - mocked_http
+  - mvvault
+  - pwd_manager
+  - recli
+  - rejector
+  - sheeteval
+  - sith
+  - test_translator
+  - textdrop
+  - trajectory_api
+  - xjq
+
+save_dir: outputs/experiments/paper-v2-reference
+save_template: "${model.name}/${agent.type}-${agent.version}_${prompt}_${thinking}_${now:%Y%m%dT%H%M%S}"

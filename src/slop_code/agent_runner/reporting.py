@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import tarfile
 import tempfile
 from datetime import datetime
@@ -20,6 +21,7 @@ from slop_code.agent_runner.agent import CheckpointInferenceResult
 from slop_code.agent_runner.models import AgentRunSpec
 from slop_code.agent_runner.models import UsageTracker
 from slop_code.agent_runner.state import AgentStateEnum
+from slop_code.common.atomic import atomic_write_text
 from slop_code.evaluation import CheckpointConfig
 from slop_code.evaluation import CorrectnessResults
 from slop_code.evaluation import GroupType
@@ -51,6 +53,7 @@ class AgentCheckpointSummary(BaseModel):
     usage: UsageTracker
     passed_policy: bool | None = None
     error_message: str | None = None
+    evaluation_error_message: str | None = None
     had_error: bool
 
     @classmethod
@@ -70,13 +73,23 @@ class AgentCheckpointSummary(BaseModel):
             pass_policy = PassPolicy(pass_policy)
 
         if evaluation_result is not None:
-            passed_policy = pass_policy.check(
-                evaluation_result.pass_counts,
-                evaluation_result.total_counts,
-            )
+            # A structured report may still represent an evaluator/container
+            # failure. Counts from such a report are evidence, not a valid
+            # model score.
+            if (
+                getattr(evaluation_result, "infrastructure_failure", False)
+                is True
+            ):
+                passed_policy = False
+            else:
+                passed_policy = pass_policy.check(
+                    evaluation_result.pass_counts,
+                    evaluation_result.total_counts,
+                )
         else:
-            # No evaluation - pass if policy allows any case
-            passed_policy = pass_policy == PassPolicy.ANY_CASE
+            # No evaluation - ANY_CASE permits continuation only when inference
+            # itself succeeded.
+            passed_policy = not had_error and pass_policy == PassPolicy.ANY_CASE
 
         return cls(
             checkpoint_name=checkpoint_name,
@@ -89,12 +102,92 @@ class AgentCheckpointSummary(BaseModel):
         )
 
 
+def _preserve_malformed_run_info(target: Path) -> Path | None:
+    """Copy malformed run metadata before an atomic replacement."""
+    # The atomic writer below rejects symlinks. Avoid following one while
+    # trying to preserve malformed evidence first.
+    if target.is_symlink():
+        return None
+    if not target.exists():
+        return None
+    malformed = False
+    try:
+        with target.open(encoding="utf-8") as handle:
+            malformed = _validate_saved_run_info(yaml.safe_load(handle)) is None
+    except (OSError, yaml.YAMLError):
+        malformed = True
+    if not malformed:
+        return None
+
+    timestamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
+    backup = target.with_name(f"run_info.corrupt-{timestamp}.yaml")
+    moved = False
+    if not target.is_file():
+        # A directory, FIFO, or other non-regular artifact cannot be replaced
+        # by os.replace(temp_file, target). Move it intact so the normal atomic
+        # writer can recreate run_info.yaml at the expected path.
+        target.replace(backup)
+        moved = True
+    else:
+        try:
+            shutil.copy2(target, backup)
+        except OSError:
+            # A regular file can be stat-able but unreadable. Renaming only
+            # needs write access to the parent and preserves the exact bytes.
+            target.replace(backup)
+            moved = True
+    logger.warning(
+        "Preserved malformed run info before replacement",
+        source=str(target),
+        backup=str(backup),
+        moved=moved,
+    )
+    return backup
+
+
+def _write_run_info_atomically(target: Path, run_info: dict[str, Any]) -> None:
+    """Write run metadata without exposing readers to a partial YAML file."""
+    serialized = yaml.dump(run_info, indent=2, sort_keys=True)
+    backup = _preserve_malformed_run_info(target)
+    try:
+        atomic_write_text(target, serialized)
+    except BaseException:  # noqa: BLE001
+        # A non-regular or unreadable target may have needed to be moved out of
+        # the way. If the atomic writer failed before publishing a replacement,
+        # restore the exact original path; the caller still receives the write
+        # failure and can retry safely.
+        if backup is not None and not target.exists():
+            backup.replace(target)
+        raise
+
+
 class CheckpointState:
     """Valid states for checkpoint execution."""
 
     RAN = "ran"
     SKIPPED = "skipped"
     ERROR = "error"
+    EVALUATION_ERROR = "evaluation_error"
+
+
+_VALID_CHECKPOINT_STATES = {
+    CheckpointState.RAN,
+    CheckpointState.SKIPPED,
+    CheckpointState.ERROR,
+    CheckpointState.EVALUATION_ERROR,
+}
+
+
+def _has_evaluation_error(result: AgentCheckpointSummary) -> bool:
+    """Recognize a persisted evaluator failure, including legacy summaries.
+
+    Older callers and lightweight tests may supply summary-shaped objects that
+    predate ``evaluation_error_message``. An unconstrained ``Mock`` also
+    synthesizes a truthy attribute on access, so only a real non-empty string
+    is evidence of an evaluator failure.
+    """
+    message = getattr(result, "evaluation_error_message", None)
+    return isinstance(message, str) and bool(message.strip())
 
 
 class RunSummary(BaseModel):
@@ -139,6 +232,7 @@ class RunSummary(BaseModel):
     error_type: str | None = None
     error_message: str | None = None
     error_traceback: str | None = None
+    secondary_errors: list[str] = Field(default_factory=list)
 
     # Aggregated evaluation
     passed_policy: bool | None = None
@@ -156,6 +250,101 @@ class RunSummary(BaseModel):
         if isinstance(v, str):
             return datetime.fromisoformat(v)
         return v
+
+
+def _is_nonnegative_number(value: object) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, int | float)
+        and math.isfinite(value)
+        and value >= 0
+    )
+
+
+def _is_nonnegative_integer(value: object) -> bool:
+    return type(value) is int and value >= 0
+
+
+def _usage_has_valid_domains(value: object) -> bool:
+    """Validate persisted usage without accepting Pydantic coercions."""
+    if not isinstance(value, dict):
+        return False
+    if not _is_nonnegative_number(value.get("cost")):
+        return False
+    if not _is_nonnegative_integer(value.get("steps")):
+        return False
+    for token_key in ("net_tokens", "current_tokens"):
+        tokens = value.get(token_key)
+        if not isinstance(tokens, dict):
+            return False
+        for field_name in common.TokenUsage.model_fields:
+            if not _is_nonnegative_integer(tokens.get(field_name)):
+                return False
+    return True
+
+
+def _validate_saved_run_info(value: object) -> RunSummary | None:
+    """Return a fully validated saved summary, or ``None`` when untrusted."""
+    if not isinstance(value, dict):
+        return None
+    raw_summary = value.get("summary")
+    if not isinstance(raw_summary, dict):
+        return None
+    if not _is_nonnegative_number(raw_summary.get("duration_seconds")):
+        return None
+    if not _is_nonnegative_number(raw_summary.get("total_cost")):
+        return None
+    if not _is_nonnegative_integer(raw_summary.get("total_steps")):
+        return None
+    if not _usage_has_valid_domains(raw_summary.get("total_usage")):
+        return None
+    passed_policy = raw_summary.get("passed_policy")
+    if passed_policy is not None and type(passed_policy) is not bool:
+        return None
+    secondary_errors = raw_summary.get("secondary_errors", [])
+    if not isinstance(secondary_errors, list) or any(
+        not isinstance(error, str) or not error.strip()
+        for error in secondary_errors
+    ):
+        return None
+    checkpoint_states = raw_summary.get("checkpoints")
+    if not isinstance(checkpoint_states, dict) or any(
+        not isinstance(name, str)
+        or not isinstance(state, str)
+        or state not in _VALID_CHECKPOINT_STATES
+        for name, state in checkpoint_states.items()
+    ):
+        return None
+    try:
+        summary = RunSummary.model_validate(raw_summary)
+    except (TypeError, ValueError):
+        return None
+    try:
+        ended_before_started = summary.ended < summary.started
+        timestamp_duration = (summary.ended - summary.started).total_seconds()
+    except TypeError:
+        # Offset-aware and offset-naive datetimes are individually valid to
+        # Pydantic but do not inhabit a comparable timestamp domain.
+        return None
+    if ended_before_started:
+        return None
+    if not math.isclose(
+        summary.duration_seconds,
+        timestamp_duration,
+        rel_tol=1e-9,
+        abs_tol=1e-6,
+    ):
+        return None
+    if not math.isclose(
+        summary.total_cost,
+        summary.total_usage.cost,
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    ):
+        return None
+    if summary.total_steps != summary.total_usage.steps:
+        return None
+    return summary
 
 
 class CheckpointEvalResult(BaseModel):
@@ -198,6 +387,7 @@ class MetricsTracker(BaseModel):
     error_type: str | None = None
     error_message: str | None = None
     error_traceback: str | None = None
+    secondary_errors: list[str] = Field(default_factory=list)
     checkpoint_results: list[CheckpointEvalResult] = Field(default_factory=list)
 
     def finish_checkpoint(self, usage: UsageTracker) -> None:
@@ -231,6 +421,17 @@ class MetricsTracker(BaseModel):
         self.error_type = type(error).__name__
         self.error_message = str(error)
         self.error_traceback = traceback_text
+
+    def record_secondary_error(
+        self,
+        error: BaseException,
+        *,
+        phase: str,
+    ) -> None:
+        """Persist a cleanup/finalization failure without replacing primary."""
+        self.secondary_errors.append(
+            f"{phase}: {type(error).__qualname__}: {error}"
+        )
 
     def record_checkpoint_result(
         self,
@@ -393,7 +594,9 @@ def save_results(
     for name in all_checkpoint_names:
         if name in results_by_name:
             result = results_by_name[name]
-            if result.had_error:
+            if _has_evaluation_error(result):
+                checkpoints_state[name] = CheckpointState.EVALUATION_ERROR
+            elif result.had_error:
                 checkpoints_state[name] = CheckpointState.ERROR
             else:
                 checkpoints_state[name] = CheckpointState.RAN
@@ -401,6 +604,11 @@ def save_results(
             checkpoints_state[name] = CheckpointState.SKIPPED
 
     ended = datetime.now()
+    secondary_errors = getattr(metrics_tracker, "secondary_errors", [])
+    if not isinstance(secondary_errors, list) or any(
+        not isinstance(error, str) for error in secondary_errors
+    ):
+        secondary_errors = []
     summary = RunSummary(
         started=metrics_tracker.started,
         ended=ended,
@@ -413,9 +621,12 @@ def save_results(
         error_type=metrics_tracker.error_type,
         error_message=metrics_tracker.error_message,
         error_traceback=metrics_tracker.error_traceback,
+        secondary_errors=secondary_errors,
         # Errored/skipped checkpoints are complete failures
         passed_policy=all(
-            (r.passed_policy and not r.had_error) or run_spec.skip_evaluation
+            not r.had_error
+            and not _has_evaluation_error(r)
+            and (run_spec.skip_evaluation or bool(r.passed_policy))
             for r in results
         )
         and len(results) == len(all_checkpoint_names),
@@ -432,8 +643,10 @@ def save_results(
         "summary": common.serialize_path_dict(summary.model_dump(mode="json")),
     }
 
-    with (output_path / common.RUN_INFO_FILENAME).open("w") as f:
-        yaml.dump(run_info, f, indent=2, sort_keys=True)
+    _write_run_info_atomically(
+        output_path / common.RUN_INFO_FILENAME,
+        run_info,
+    )
 
     logger.info(
         "Run info saved successfully",

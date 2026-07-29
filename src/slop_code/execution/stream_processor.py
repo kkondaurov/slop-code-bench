@@ -31,6 +31,13 @@ from slop_code.execution.runtime import RuntimeResult
 logger = structlog.get_logger(__name__)
 
 DEFAULT_WAIT_TIMEOUT = 7200.0  # 2 hours
+STREAM_PUMP_JOIN_TIMEOUT = 5.0
+STREAM_EXIT_POLL_INTERVAL = 0.01
+
+StreamQueueEvent = tuple[
+    Literal["stdout", "stderr", "error", "finished"],
+    str | BaseException | None,
+]
 
 
 def ensure_string(data: bytes | str) -> str:
@@ -41,9 +48,7 @@ def ensure_string(data: bytes | str) -> str:
 
 def start_stream_pump(
     stream: Iterator[tuple[bytes | str, bytes | str]],
-    event_queue: queue.Queue[
-        tuple[Literal["stdout", "stderr", "finished"], str | None]
-    ],
+    event_queue: queue.Queue[StreamQueueEvent],
     stop_event: threading.Event,
 ) -> threading.Thread:
     """Start a thread to pump a demuxed stream into an event queue.
@@ -57,16 +62,20 @@ def start_stream_pump(
 
     def pump() -> None:
         """Pump demuxed stream to event queue."""
-        for stdout, stderr in stream:
-            if stdout:
-                contents = ensure_string(stdout)
-                event_queue.put(("stdout", contents))
-            if stderr:
-                contents = ensure_string(stderr)
-                event_queue.put(("stderr", contents))
-            if stop_event.is_set():
-                break
-        event_queue.put(("finished", None))
+        try:
+            for stdout, stderr in stream:
+                if stdout:
+                    contents = ensure_string(stdout)
+                    event_queue.put(("stdout", contents))
+                if stderr:
+                    contents = ensure_string(stderr)
+                    event_queue.put(("stderr", contents))
+                if stop_event.is_set():
+                    break
+        except BaseException as error:  # noqa: BLE001
+            event_queue.put(("error", error))
+        finally:
+            event_queue.put(("finished", None))
 
     thread = threading.Thread(target=pump, daemon=True)
     thread.start()
@@ -76,7 +85,8 @@ def start_stream_pump(
 def make_timeout_fn(
     timeout: float | None, start_time: float
 ) -> Callable[[], float]:
-    deadline = start_time + (timeout or DEFAULT_WAIT_TIMEOUT)
+    wait_timeout = DEFAULT_WAIT_TIMEOUT if timeout is None else timeout
+    deadline = start_time + wait_timeout
 
     def timeout_fn() -> float:
         return deadline - time.monotonic()
@@ -94,9 +104,7 @@ def process_stream(
     start_time = time.monotonic()
     timeout_fn = make_timeout_fn(timeout, start_time)
     stop_event = threading.Event()
-    event_queue: queue.Queue[
-        tuple[Literal["stdout", "stderr", "finished"], str | None]
-    ] = queue.Queue()
+    event_queue: queue.Queue[StreamQueueEvent] = queue.Queue()
     thread = start_stream_pump(stream, event_queue, stop_event)
     stdout = ""
     stderr = ""
@@ -105,6 +113,20 @@ def process_stream(
     yielding_stdout = yield_only_after is None
     yielding_stderr = yield_only_after is None
     timed_out = False
+    pump_error: BaseException | None = None
+
+    def wait_for_process_exit() -> int | None:
+        """Wait for status propagation without exceeding the run deadline."""
+        nonlocal timed_out
+        while True:
+            code = poll_fn()
+            if code is not None:
+                return code
+            remaining = timeout_fn()
+            if remaining <= 0:
+                timed_out = True
+                return None
+            time.sleep(min(STREAM_EXIT_POLL_INTERVAL, remaining))
 
     def handle_event(
         kind: Literal["stdout", "stderr"],
@@ -151,7 +173,9 @@ def process_stream(
             break
 
         try:
-            kind, payload = event_queue.get(timeout=remaining)
+            kind, payload = event_queue.get(
+                timeout=min(STREAM_EXIT_POLL_INTERVAL, remaining)
+            )
         except queue.Empty:
             if (exit_code := poll_fn()) is not None:
                 break
@@ -159,13 +183,31 @@ def process_stream(
 
         if kind == "finished":
             logger.debug("Received finished event")
+            # Stream EOF can become visible just before the process status.
+            # Preserve the original timeout while allowing that short status
+            # propagation window; otherwise a successful exit becomes -1.
+            if pump_error is None and exit_code is None:
+                exit_code = wait_for_process_exit()
             break
 
-        if payload is None:
+        if kind == "error":
+            if isinstance(payload, BaseException):
+                pump_error = payload
+            else:
+                pump_error = RuntimeError("Stream pump failed without an error")
+            continue
+
+        if not isinstance(payload, str):
             logger.error("Received empty stream event", kind=kind)
             break
 
         yield from handle_event(kind, payload)
+
+    # A short-lived process can exit before the pump thread has enqueued its
+    # final stdout/stderr chunks. Once the process is known to be done, wait
+    # for the pump before draining the queue.
+    if exit_code is not None:
+        thread.join(timeout=STREAM_PUMP_JOIN_TIMEOUT)
 
     # Handle any remaining events in the queue
     while True:
@@ -178,7 +220,14 @@ def process_stream(
             logger.debug("Received finished event")
             break
 
-        if payload is None:
+        if kind == "error":
+            if isinstance(payload, BaseException):
+                pump_error = payload
+            else:
+                pump_error = RuntimeError("Stream pump failed without an error")
+            continue
+
+        if not isinstance(payload, str):
             logger.error("Received empty stream event", kind=kind)
             break
 
@@ -186,9 +235,35 @@ def process_stream(
 
     elapsed = time.monotonic() - start_time
     stop_event.set()
-    thread.join()
+    thread.join(timeout=STREAM_PUMP_JOIN_TIMEOUT)
+    if thread.is_alive() and not timed_out:
+        raise RuntimeError(
+            "Stream pump did not stop after process exit "
+            f"{exit_code}; streamed output may be incomplete"
+        )
 
-    exit_code = exit_code or poll_fn()
+    # A pump that needed the final bounded join may have added one last chunk.
+    while True:
+        try:
+            kind, payload = event_queue.get_nowait()
+        except queue.Empty:
+            break
+        if kind == "finished":
+            continue
+        if kind == "error":
+            if isinstance(payload, BaseException):
+                pump_error = payload
+            else:
+                pump_error = RuntimeError("Stream pump failed without an error")
+            continue
+        if isinstance(payload, str):
+            yield from handle_event(kind, payload)
+
+    if pump_error is not None:
+        raise pump_error
+
+    if exit_code is None and not timed_out:
+        exit_code = poll_fn()
     if exit_code is None:
         exit_code = -1
     logger.debug(

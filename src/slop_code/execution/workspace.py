@@ -21,6 +21,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from slop_code.common import WORKSPACE_TEST_DIR
+from slop_code.common.temp import temporary_directory
 from slop_code.execution.assets import ResolvedStaticAsset
 from slop_code.execution.models import ExecutionError
 from slop_code.execution.snapshot import Snapshot
@@ -89,7 +90,10 @@ class Workspace:
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         """Context manager exit."""
-        self.cleanup()
+        try:
+            self.cleanup()
+        finally:
+            self.cleanup_snapshot()
 
     @property
     def working_dir(self) -> Path:
@@ -305,7 +309,7 @@ class Workspace:
         if self._temp_dir is not None:
             raise WorkspaceError("Workspace already prepared")
         logger.debug("Preparing workspace", verbose=True)
-        self._temp_dir = tempfile.TemporaryDirectory()
+        self._temp_dir = temporary_directory()
         self._prepare_initial_snapshot()
         logger.debug(
             "Workspace prepared",
@@ -332,6 +336,13 @@ class Workspace:
         )
         self._temp_dir.cleanup()
         self._temp_dir = None
+
+    def cleanup_snapshot(self) -> None:
+        """Release the archive owned by the current workspace snapshot."""
+        if self._initial_snapshot is None:
+            return
+        self._initial_snapshot.cleanup()
+        self._initial_snapshot = None
 
     def reset(self) -> None:
         """Reset the workspace to its initial state."""

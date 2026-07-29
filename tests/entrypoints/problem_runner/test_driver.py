@@ -5,9 +5,13 @@ import queue
 from concurrent.futures import Future
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
+from unittest.mock import Mock
+from unittest.mock import patch
 
 from slop_code.agent_runner import AgentStateEnum
+from slop_code.agent_runner.models import UsageTracker
 from slop_code.common import EVALUATION_FILENAME
 from slop_code.common import INFERENCE_RESULT_FILENAME
 from slop_code.entrypoints.problem_runner import driver
@@ -42,10 +46,27 @@ def _write_checkpoint_artifacts(
 ) -> None:
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     inference = {
+        "started": "2026-01-01T00:00:00",
+        "completed": "2026-01-01T00:00:00",
+        "elapsed": 0.0,
+        "had_error": False,
         "usage": {
             "cost": cost,
             "steps": steps,
-            "net_tokens": {"input": 100, "output": 50},
+            "net_tokens": {
+                "input": 100,
+                "output": 50,
+                "cache_read": 0,
+                "cache_write": 0,
+                "reasoning": 0,
+            },
+            "current_tokens": {
+                "input": 100,
+                "output": 50,
+                "cache_read": 0,
+                "cache_write": 0,
+                "reasoning": 0,
+            },
         }
     }
     with (checkpoint_dir / INFERENCE_RESULT_FILENAME).open("w") as f:
@@ -155,7 +176,16 @@ def test_prepopulate_handles_missing_evaluation(tmp_path: Path) -> None:
     with (problem_dir / "checkpoint_1" / INFERENCE_RESULT_FILENAME).open(
         "w"
     ) as f:
-        json.dump({"usage": {"cost": 0.5, "steps": 1}}, f)
+        json.dump(
+            {
+                "started": "2026-01-01T00:00:00",
+                "completed": "2026-01-01T00:00:00",
+                "elapsed": 0.0,
+                "had_error": False,
+                "usage": UsageTracker(cost=0.5, steps=1).model_dump(),
+            },
+            f,
+        )
 
     checkpoint_map = {problem: ["checkpoint_1"]}
     states = ProblemStateTracker([problem], checkpoint_map)
@@ -187,6 +217,46 @@ def test_prepopulate_empty_completed_list_is_noop(tmp_path: Path) -> None:
     assert state.state == AgentStateEnum.PENDING
     assert state.overall_usage is None
     assert state.total_checkpoints_evaluated == 0
+
+
+def test_worker_marks_evaluator_error_as_unsuccessful(tmp_path: Path) -> None:
+    config = cast(
+        "RunTaskConfig",
+        SimpleNamespace(
+            run_dir=tmp_path / "run",
+            problem_base_path=tmp_path / "problems",
+            live_progress=False,
+            debug=True,
+        ),
+    )
+    with (
+        patch.object(
+            driver.evaluation.ProblemConfig,
+            "from_yaml",
+            return_value=Mock(),
+        ),
+        patch.object(
+            driver,
+            "run_agent_on_problem",
+            return_value={
+                "summary": {
+                    "state": "error",
+                    "passed_policy": False,
+                    "error_type": "EvaluationError",
+                    "error_message": "checkpoint evaluator failed",
+                }
+            },
+        ),
+    ):
+        result = driver._run_problem_worker(
+            "p",
+            config,
+            queue.Queue(),
+        )
+
+    assert result.success is False
+    assert result.error_type == "EvaluationError"
+    assert result.error_message == "checkpoint evaluator failed"
 
 
 def test_run_problems_recycles_workers_between_problems(

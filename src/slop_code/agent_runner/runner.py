@@ -21,12 +21,15 @@ from slop_code.agent_runner.models import UsageTracker
 from slop_code.agent_runner.reporting import AgentCheckpointSummary
 from slop_code.agent_runner.reporting import MetricsTracker
 from slop_code.agent_runner.resume import ResumeInfo
+from slop_code.agent_runner.resume import _load_inference_result
 from slop_code.agent_runner.state import AgentStateEnum
+from slop_code.common.atomic import atomic_write_text
 from slop_code.evaluation import CheckpointConfig
 from slop_code.evaluation import CorrectnessResults
 from slop_code.evaluation import PassPolicy
 from slop_code.evaluation import ProblemConfig
 from slop_code.evaluation import run_checkpoint as evaluate_checkpoint
+from slop_code.execution import DockerEnvironmentSpec
 from slop_code.execution import EnvironmentSpec
 from slop_code.execution import Session
 from slop_code.execution import SnapshotDiff
@@ -41,6 +44,53 @@ logger = get_logger(__name__)
 
 class AgentRunnerError(Exception):
     """Exception raised by AgentRunner."""
+
+
+class EvaluationError(AgentRunnerError):
+    """A checkpoint snapshot could not be evaluated reliably."""
+
+
+class ResumeCommandError(AgentRunnerError):
+    """A restored checkpoint environment could not be reconstructed."""
+
+
+def _record_secondary_cleanup_error(
+    primary_error: BaseException,
+    cleanup_error: BaseException,
+    *,
+    phase: str,
+) -> None:
+    """Keep a primary failure while making cleanup damage visible."""
+    if not isinstance(cleanup_error, Exception):
+        cleanup_error.add_note(
+            f"Earlier {phase} failure: "
+            f"{type(primary_error).__qualname__}: {primary_error}"
+        )
+        logger.error(
+            "Cancellation/control flow interrupted secondary cleanup",
+            phase=phase,
+            primary_error_type=type(primary_error).__qualname__,
+            primary_error_message=str(primary_error),
+            cleanup_error_type=type(cleanup_error).__qualname__,
+            cleanup_error_message=str(cleanup_error),
+            exc_info=True,
+        )
+        raise cleanup_error
+    primary_error.add_note(
+        f"Secondary {phase} cleanup failure: "
+        f"{type(cleanup_error).__qualname__}: {cleanup_error}"
+    )
+    for note in getattr(cleanup_error, "__notes__", ()):
+        primary_error.add_note(f"Secondary {phase} detail: {note}")
+    logger.error(
+        "Cleanup failed while preserving an earlier checkpoint error",
+        phase=phase,
+        primary_error_type=type(primary_error).__qualname__,
+        primary_error_message=str(primary_error),
+        cleanup_error_type=type(cleanup_error).__qualname__,
+        cleanup_error_message=str(cleanup_error),
+        exc_info=True,
+    )
 
 
 def get_artifacts_path(checkpoint_save_dir: Path, *, compress: bool) -> Path:
@@ -66,6 +116,12 @@ def _save_agent_artifacts_after_checkpoint_error(
             compress_artifacts=compress_artifacts,
         )
     except BaseException as artifact_error:  # noqa: BLE001
+        if not isinstance(artifact_error, Exception):
+            artifact_error.add_note(
+                "Earlier checkpoint failure: "
+                f"{type(original_error).__qualname__}: {original_error}"
+            )
+            raise
         logger.error(
             "Failed to save agent artifacts after checkpoint error",
             checkpoint=checkpoint_name,
@@ -82,6 +138,83 @@ def _save_agent_artifacts_after_checkpoint_error(
         "Saved agent artifacts after checkpoint error",
         checkpoint=checkpoint_name,
         artifacts_path=str(checkpoint_save_dir / artifacts_name),
+    )
+
+
+def _save_evaluation_error(
+    checkpoint_name: str,
+    checkpoint_save_dir: Path,
+    error: BaseException,
+    traceback_text: str,
+) -> str:
+    """Persist a checkpoint-local evaluator failure atomically."""
+    message = f"{type(error).__qualname__}: {error}"
+    payload = {
+        "checkpoint": checkpoint_name,
+        "error_type": type(error).__qualname__,
+        "error_message": str(error),
+        "traceback": traceback_text,
+        "recorded_at": datetime.now().isoformat(),
+    }
+    target = checkpoint_save_dir / common.EVALUATION_ERROR_FILENAME
+    checkpoint_save_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(
+        target,
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+    )
+    return message
+
+
+def _persist_evaluation_error_preserving_primary(
+    checkpoint_name: str,
+    checkpoint_save_dir: Path,
+    error: BaseException,
+    traceback_text: str,
+) -> str:
+    """Persist evaluator evidence without replacing the evaluator failure."""
+    message = f"{type(error).__qualname__}: {error}"
+    try:
+        return _save_evaluation_error(
+            checkpoint_name,
+            checkpoint_save_dir,
+            error,
+            traceback_text,
+        )
+    except BaseException as artifact_error:  # noqa: BLE001
+        _record_secondary_cleanup_error(
+            error,
+            artifact_error,
+            phase="evaluation error artifact",
+        )
+        return message
+
+
+def _clear_evaluation_error(checkpoint_save_dir: Path) -> None:
+    (checkpoint_save_dir / common.EVALUATION_ERROR_FILENAME).unlink(
+        missing_ok=True
+    )
+
+
+def _save_resume_error(
+    checkpoint_name: str,
+    checkpoint_save_dir: Path,
+    command: str,
+    result: Any,
+) -> None:
+    """Persist a failed resume command before aborting the checkpoint."""
+    payload = {
+        "checkpoint": checkpoint_name,
+        "command": command,
+        "exit_code": result.exit_code,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "recorded_at": datetime.now().isoformat(),
+    }
+    target = checkpoint_save_dir / common.RESUME_ERROR_FILENAME
+    checkpoint_save_dir.mkdir(parents=True, exist_ok=True)
+    atomic_write_text(
+        target,
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
     )
 
 
@@ -103,6 +236,7 @@ def _load_eval_result(checkpoint_dir: Path) -> CorrectnessResults | None:
 def create_agent_session(
     problem_config: ProblemConfig,
     environment_spec: EnvironmentSpec,
+    base_dir: Path | None = None,
 ) -> Session:
     """Create an execution session for an agent.
 
@@ -111,6 +245,7 @@ def create_agent_session(
     Args:
         problem_config: Configuration for the problem being solved
         environment_spec: Specification for the execution environment
+        base_dir: Optional prior checkpoint snapshot to restore
 
     Returns:
         Configured Session ready for agent execution
@@ -126,7 +261,7 @@ def create_agent_session(
     )
     return Session.from_environment_spec(
         spec=environment_spec,
-        base_dir=None,
+        base_dir=base_dir,
         static_assets=static_assets,
         is_agent_infer=True,
     )
@@ -315,7 +450,17 @@ def evaluate_agent_snapshot(
         env_spec=environment,
     )
 
+    # Keep the structured evaluator output as primary evidence even when pytest
+    # itself failed. The caller will additionally persist evaluation_error.json
+    # and mark the run incomplete rather than misclassifying infrastructure
+    # damage as a model failure (or, worse, a model success).
     report.save(save_dir)
+    if report.infrastructure_failure:
+        raise EvaluationError(
+            "Checkpoint evaluator reported an infrastructure failure for "
+            f"'{checkpoint.name}' (pytest exit code "
+            f"{report.pytest_exit_code}, collected {report.pytest_collected})"
+        )
 
     pretty_counts = {
         k: f"{report.pass_counts.get(k, 0)}/{v}"
@@ -358,6 +503,8 @@ def _run_inference(
     logger.info("Running inference for checkpoint", checkpoint=checkpoint_name)
     snapshot_dir = save_dir / common.SNAPSHOT_DIR_NAME
     started = datetime.now()
+    inference_error: BaseException | None = None
+    abort_after_finalization = False
     try:
         result = _run_checkpoint_task(
             agent=agent,
@@ -370,31 +517,51 @@ def _run_inference(
             "Completed checkpoint inference",
             checkpoint=checkpoint_name,
         )
-    except Exception:
-        completed = datetime.now()
-        error = traceback.format_exc()
-        logger.error(
-            "Checkpoint inference raised exception",
-            checkpoint=checkpoint_name,
-            error=error,
-            exc_info=True,
-        )
-        result = CheckpointInferenceResult(
-            started=started,
-            completed=completed,
-            elapsed=(completed - started).total_seconds(),
-            usage=agent.usage.model_copy(deep=True),
-            had_error=True,
-            error_message=error,
-        )
+    except BaseException as error:  # noqa: BLE001
+        inference_error = error
+        abort_after_finalization = not isinstance(error, Exception)
+        if abort_after_finalization:
+            # Cancellation and process-control exceptions are never converted
+            # into an ordinary model failure. Snapshot only after quiescing,
+            # then re-raise the same object below.
+            result = None
+        else:
+            completed = datetime.now()
+            error_text = traceback.format_exc()
+            logger.error(
+                "Checkpoint inference raised exception",
+                checkpoint=checkpoint_name,
+                error=error_text,
+                exc_info=True,
+            )
+            result = CheckpointInferenceResult(
+                started=started,
+                completed=completed,
+                elapsed=(completed - started).total_seconds(),
+                usage=agent.usage.model_copy(deep=True),
+                had_error=True,
+                error_message=error_text,
+            )
 
-    finally:
+    try:
         diff = session.finish_checkpoint(snapshot_dir)
-        logger.debug(
-            "Created checkpoint snapshot",
-            checkpoint=checkpoint_name,
-            changes=repr(diff),
-        )
+    except BaseException as finalization_error:  # noqa: BLE001
+        if inference_error is not None:
+            _record_secondary_cleanup_error(
+                inference_error,
+                finalization_error,
+                phase="checkpoint finalization",
+            )
+            raise inference_error.with_traceback(inference_error.__traceback__)
+        raise
+
+    logger.debug(
+        "Created checkpoint snapshot",
+        checkpoint=checkpoint_name,
+        changes=repr(diff),
+    )
+    if abort_after_finalization and inference_error is not None:
+        raise inference_error.with_traceback(inference_error.__traceback__)
 
     return snapshot_dir, result, diff
 
@@ -470,10 +637,13 @@ class AgentRunner:
         )
         self.progress_thread: threading.Thread | None = None
         self.results: list[AgentCheckpointSummary] = []
+        self._has_executed_checkpoint = False
+        self._checkpoint_usage_committed = True
         # Concurrent-eval bookkeeping (eval overlaps the next solve).
         # Guards record_checkpoint_result against the background eval thread.
         self._metrics_lock = threading.Lock()
         self._eval_reports: dict[str, CorrectnessResults] = {}
+        self._pending_eval_thread: threading.Thread | None = None
         # Checkpoints whose concurrent eval raised. Surfaced at each cp boundary
         # in _run_problem so failures don't stay hidden until end-of-run.
         self._failed_evals: dict[str, str] = {}
@@ -542,26 +712,6 @@ class AgentRunner:
             )
         )
 
-        # Create session and enter context
-        self._session = create_agent_session(
-            problem_config=self.run_spec.problem,
-            environment_spec=self.run_spec.environment,
-        )
-        self._session.__enter__()
-
-        # Materialize assets: fresh runs do it explicitly, resume does it in restore_from_snapshot_dir
-        if (
-            is_resuming
-            and resume_info is not None
-            and resume_info.last_snapshot_dir
-        ):
-            self._session.restore_from_snapshot_dir(
-                resume_info.last_snapshot_dir
-            )
-            self._run_resume_commands()
-        else:
-            self._session.materialize_assets()
-
         # Start progress monitoring
         self.progress_thread = threading.Thread(
             target=agent_progress_watcher,
@@ -575,7 +725,11 @@ class AgentRunner:
         )
         self.progress_thread.start()
 
-    def _run_resume_commands(self) -> None:
+    def _run_resume_commands(
+        self,
+        checkpoint_name: str,
+        checkpoint_save_dir: Path,
+    ) -> None:
         """Run resume commands after restoring snapshot.
 
         These commands are run to restore the environment state,
@@ -591,28 +745,74 @@ class AgentRunner:
             "Running resume commands",
             num_commands=len(resume_commands),
         )
+        (checkpoint_save_dir / common.RESUME_ERROR_FILENAME).unlink(
+            missing_ok=True
+        )
 
         # Execute each resume command with its own runtime
         for cmd in resume_commands:
             logger.debug("Running resume command", command=cmd)
-            runtime = self.session.exec(command=cmd, disable_setup=True)
+            runtime_kwargs: dict[str, str] = {}
+            if isinstance(
+                self.run_spec.environment,
+                DockerEnvironmentSpec,
+            ):
+                runtime_kwargs["user"] = (
+                    self.run_spec.environment.get_eval_user()
+                )
+            runtime = self.session.exec(
+                command=cmd,
+                disable_setup=True,
+                **runtime_kwargs,
+            )
+            command_error: BaseException | None = None
             try:
                 result = runtime.execute(env={}, stdin=None, timeout=300)
                 if result.exit_code != 0:
-                    logger.warning(
+                    error = ResumeCommandError(
+                        "Resume command failed for "
+                        f"'{checkpoint_name}' with exit code "
+                        f"{result.exit_code}: {cmd}"
+                    )
+                    try:
+                        _save_resume_error(
+                            checkpoint_name,
+                            checkpoint_save_dir,
+                            cmd,
+                            result,
+                        )
+                    except BaseException as artifact_error:  # noqa: BLE001
+                        _record_secondary_cleanup_error(
+                            error,
+                            artifact_error,
+                            phase="resume error artifact",
+                        )
+                    logger.error(
                         "Resume command failed",
                         command=cmd,
                         exit_code=result.exit_code,
                         stderr=result.stderr[:500] if result.stderr else None,
                     )
-                else:
-                    logger.debug(
-                        "Resume command completed",
-                        command=cmd,
-                        exit_code=result.exit_code,
-                    )
+                    raise error
+                logger.debug(
+                    "Resume command completed",
+                    command=cmd,
+                    exit_code=result.exit_code,
+                )
+            except BaseException as error:  # noqa: BLE001
+                command_error = error
+                raise
             finally:
-                runtime.cleanup()
+                try:
+                    runtime.cleanup()
+                except BaseException as cleanup_error:  # noqa: BLE001
+                    if command_error is None:
+                        raise
+                    _record_secondary_cleanup_error(
+                        command_error,
+                        cleanup_error,
+                        phase="resume command",
+                    )
 
     def run(self) -> dict[str, Any]:
         """Main entry point: setup, execute checkpoints, finish."""
@@ -622,9 +822,11 @@ class AgentRunner:
         )
 
         self.setup()
+        run_error: BaseException | None = None
         try:
             self.results = self._run_problem()
         except BaseException as e:  # noqa: BLE001
+            run_error = e
             tb_text = traceback.format_exc()
             logger.error(
                 "Error running problem",
@@ -638,55 +840,216 @@ class AgentRunner:
             self.metrics_tracker.state = AgentStateEnum.ERROR
             raise
         finally:
-            results = self.finish()
+            try:
+                results = self.finish()
+            except BaseException as finish_error:  # noqa: BLE001
+                if run_error is None:
+                    raise
+                _record_secondary_cleanup_error(
+                    run_error,
+                    finish_error,
+                    phase="run finalization",
+                )
         logger.info("Problem run completed", problem=self.run_spec.problem.name)
         return results
 
-    def _setup_for_checkpoint(self, checkpoint: CheckpointConfig) -> None:
-        # Update agent state for this checkpoint
-        if self.metrics_tracker.state in {
-            AgentStateEnum.INITIALIZED,
-            AgentStateEnum.PENDING,
-        }:
+    def _setup_for_checkpoint(
+        self,
+        checkpoint: CheckpointConfig,
+        checkpoint_save_dir: Path,
+        prior_snapshot_dir: Path | None,
+    ) -> None:
+        """Start a fresh agent session for one checkpoint.
+
+        Only the prior checkpoint snapshot is restored. Runtime state such as
+        the container, home directory, shell history, and installed packages
+        is deliberately not carried across checkpoint boundaries.
+        """
+        if self._session is not None:
+            raise AgentRunnerError("Previous checkpoint session is still open")
+
+        if self._has_executed_checkpoint:
             logger.info(
-                "Starting agent for the first checkpoint",
+                "Resetting agent context for the checkpoint",
                 checkpoint=checkpoint.name,
             )
-            self.agent.setup(session=self.session)
-            return
+            self.agent.finish_checkpoint(reset_context=True)
+        self._checkpoint_usage_committed = False
 
         logger.info(
-            "Resetting agent context for the checkpoint",
+            "Starting fresh agent session for checkpoint",
             checkpoint=checkpoint.name,
+            has_prior_snapshot=prior_snapshot_dir is not None,
         )
-        self.agent.finish_checkpoint(reset_context=True)
+        self._session = create_agent_session(
+            problem_config=self.run_spec.problem,
+            environment_spec=self.run_spec.environment,
+            base_dir=prior_snapshot_dir,
+        )
+        try:
+            self._session.__enter__()
+            self._session.materialize_assets()
+            if prior_snapshot_dir is not None:
+                self._run_resume_commands(
+                    checkpoint.name,
+                    checkpoint_save_dir,
+                )
+            self.agent.setup(session=self._session)
+        except BaseException as setup_error:
+            try:
+                self._cleanup_checkpoint_session()
+            except BaseException as cleanup_error:  # noqa: BLE001
+                _record_secondary_cleanup_error(
+                    setup_error,
+                    cleanup_error,
+                    phase="setup",
+                )
+            raise
+
+    def _cleanup_checkpoint_session(self) -> None:
+        """Tear down agent/runtime/workspace state at a checkpoint boundary."""
+        if self._session is None:
+            return
+
+        session = self._session
+        agent_cleanup_error: BaseException | None = None
+        session_cleanup_succeeded = False
+        try:
+            try:
+                Agent.cleanup_for_session(self.agent)
+            except BaseException as error:  # noqa: BLE001
+                agent_cleanup_error = error
+            try:
+                session.__exit__(None, None, None)
+                session_cleanup_succeeded = True
+            except BaseException as session_error:  # noqa: BLE001
+                if agent_cleanup_error is None:
+                    raise
+                _record_secondary_cleanup_error(
+                    agent_cleanup_error,
+                    session_error,
+                    phase="session",
+                )
+        finally:
+            # A failed Session cleanup retains ownership of any runtime that
+            # could not be stopped. Keep the Session reachable so finish() can
+            # retry instead of orphaning a live bind-mounted process.
+            if session_cleanup_succeeded:
+                self._session = None
+        if agent_cleanup_error is not None:
+            raise agent_cleanup_error
+
+    def _commit_checkpoint_usage(self) -> None:
+        """Commit current checkpoint usage exactly once, including failures."""
+        if self._checkpoint_usage_committed:
+            return
+        self.metrics_tracker.finish_checkpoint(
+            self.agent.usage.model_copy(deep=True)
+        )
+        self._checkpoint_usage_committed = True
 
     def finish(self) -> dict[str, Any]:
         """Cleanup agent, stop monitoring, save final results."""
         logger.debug("Finishing agent run", problem=self.run_spec.problem.name)
+        cleanup_error: BaseException | None = None
 
-        # Cleanup agent
-        self.agent.cleanup()
+        # If any exception escaped outside the checkpoint solve guard, keep the
+        # evaluator alive long enough for its session-level cleanup to run.
+        if self._pending_eval_thread is not None:
+            self._pending_eval_thread.join()
+            self._pending_eval_thread = None
 
-        # Close session
-        if self._session is not None:
-            self._session.__exit__(None, None, None)
+        # A solve exception can escape while the preceding checkpoint's
+        # background evaluator is still finishing. Fold its durable result or
+        # failure into checkpoint summaries before run_info is written. This is
+        # intentionally idempotent for the normal path, which already merges at
+        # the end of _run_problem().
+        if self.run_spec.concurrent_evaluation:
+            self.results = self._merge_eval_reports(self.results)
 
-        # Save final results
-        final_results = reporting.save_results(
-            self.results, self.metrics_tracker, self.run_spec, self.output_path
-        )
+        # Normally each checkpoint has already torn down its own session. This
+        # is also the exception-path safety net.
+        try:
+            self._cleanup_checkpoint_session()
+        except BaseException as error:  # noqa: BLE001
+            cleanup_error = error
+            if self.metrics_tracker.error_type is None:
+                self.metrics_tracker.record_error(error)
+            else:
+                self.metrics_tracker.record_secondary_error(
+                    error,
+                    phase="run finalization cleanup",
+                )
+            self.metrics_tracker.state = AgentStateEnum.ERROR
+
+        # The watcher owns the final progress event. Joining it guarantees the
+        # terminal snapshot is in the queue before the worker reports done.
+        if self.progress_thread is not None:
+            self.progress_thread.join(timeout=5)
+            if self.progress_thread.is_alive():
+                watcher_error = AgentRunnerError(
+                    "Progress watcher did not stop after terminal state"
+                )
+                self.metrics_tracker.record_error(watcher_error)
+                self.metrics_tracker.state = AgentStateEnum.ERROR
+                if cleanup_error is None:
+                    cleanup_error = watcher_error
+
+        # Save final results. If both resource cleanup and persistence fail,
+        # cleanup remains the earlier finalization failure and carries the save
+        # failure as secondary evidence. An outer solve/cancellation exception
+        # remains primary and receives both details via run().
+        try:
+            final_results = reporting.save_results(
+                self.results,
+                self.metrics_tracker,
+                self.run_spec,
+                self.output_path,
+            )
+        except BaseException as save_error:  # noqa: BLE001
+            if cleanup_error is None:
+                raise
+            _record_secondary_cleanup_error(
+                cleanup_error,
+                save_error,
+                phase="run result persistence",
+            )
+            raise cleanup_error.with_traceback(cleanup_error.__traceback__)
 
         logger.info(
             "Agent run finished",
             problem=self.run_spec.problem.name,
-            final_state=self.metrics_tracker.state.value,
+            final_state=getattr(
+                self.metrics_tracker.state,
+                "value",
+                self.metrics_tracker.state,
+            ),
             passed=final_results["summary"]["passed_policy"],
         )
 
+        if cleanup_error is not None:
+            raise cleanup_error
         return final_results
 
     def _should_early_stop(self, summary: AgentCheckpointSummary) -> bool:
+        failed_evals = self._failed_evals_snapshot()
+        if failed_evals:
+            failed = sorted(failed_evals)
+            error = EvaluationError(
+                "Checkpoint evaluation failed: " + ", ".join(failed)
+            )
+            if self.metrics_tracker.error_type is None:
+                self.metrics_tracker.record_error(error)
+            elif not (
+                self.metrics_tracker.error_type == type(error).__name__
+                and self.metrics_tracker.error_message == str(error)
+            ):
+                self.metrics_tracker.record_secondary_error(
+                    error,
+                    phase="concurrent evaluation",
+                )
+            self.metrics_tracker.state = AgentStateEnum.ERROR
+            return True
         did_fail_tests = (
             summary.passed_policy is not None and not summary.passed_policy
         )
@@ -720,38 +1083,55 @@ class AgentRunner:
         checkpoint: CheckpointConfig,
         checkpoint_save_dir: Path,
         is_first_checkpoint: bool,  # noqa: FBT001
+        prior_snapshot_dir: Path | None,
     ) -> AgentCheckpointSummary:
         compress = self.run_spec.compress_artifacts
+        self._setup_for_checkpoint(
+            checkpoint,
+            checkpoint_save_dir,
+            prior_snapshot_dir,
+        )
+        self.metrics_tracker.state = AgentStateEnum.RUNNING
+        checkpoint_error: BaseException | None = None
         try:
-            self._setup_for_checkpoint(checkpoint)
-            self.metrics_tracker.state = AgentStateEnum.RUNNING
-            snapshot_dir, result, diff = run_checkpoint(
-                agent=self.agent,
-                session=self.session,
-                save_dir=checkpoint_save_dir,
-                checkpoint=checkpoint,
-                problem=self.run_spec.problem,
-                environment=self.run_spec.environment,
-                template=self.run_spec.template,
-                replay_path=self.replay_path,
-                is_first_checkpoint=is_first_checkpoint,
-                compress_artifacts=compress,
-                agent_type=self.run_spec.agent_type,
-                agent_version=self.run_spec.agent_version,
-                model_name=self.run_spec.model_name,
-            )
-            if result is not None:
-                reporting.save_agent_checkpoint_info(
-                    checkpoint_save_dir,
-                    diff,
-                    result,
-                    self.agent,
+            try:
+                snapshot_dir, result, diff = run_checkpoint(
+                    agent=self.agent,
+                    session=self.session,
+                    save_dir=checkpoint_save_dir,
+                    checkpoint=checkpoint,
+                    problem=self.run_spec.problem,
+                    environment=self.run_spec.environment,
+                    template=self.run_spec.template,
+                    replay_path=self.replay_path,
+                    is_first_checkpoint=is_first_checkpoint,
                     compress_artifacts=compress,
+                    agent_type=self.run_spec.agent_type,
+                    agent_version=self.run_spec.agent_version,
+                    model_name=self.run_spec.model_name,
                 )
-            else:
-                error = AgentRunnerError(
-                    f"Agent produced no result for checkpoint '{checkpoint.name}'"
-                )
+                if result is not None:
+                    reporting.save_agent_checkpoint_info(
+                        checkpoint_save_dir,
+                        diff,
+                        result,
+                        self.agent,
+                        compress_artifacts=compress,
+                    )
+                else:
+                    error = AgentRunnerError(
+                        "Agent produced no result for checkpoint "
+                        f"'{checkpoint.name}'"
+                    )
+                    _save_agent_artifacts_after_checkpoint_error(
+                        checkpoint.name,
+                        checkpoint_save_dir,
+                        self.agent,
+                        compress_artifacts=compress,
+                        original_error=error,
+                    )
+            except BaseException as error:  # noqa: BLE001
+                checkpoint_error = error
                 _save_agent_artifacts_after_checkpoint_error(
                     checkpoint.name,
                     checkpoint_save_dir,
@@ -759,62 +1139,78 @@ class AgentRunner:
                     compress_artifacts=compress,
                     original_error=error,
                 )
-            artifacts_path = get_artifacts_path(
-                checkpoint_save_dir, compress=compress
-            )
-            had_error = result is None or result.had_error
-            rate_limited = False
-            if had_error:
-                if result is None:
-                    error = AgentRunnerError(
-                        f"Agent produced no result for checkpoint '{checkpoint.name}'"
-                    )
-                    tb_text = None
-                else:
-                    err_msg = (
-                        result.error_message
-                        or f"Agent reported an unspecified error on '{checkpoint.name}'"
-                    )
-                    error = AgentRunnerError(err_msg)
-                    tb_text = err_msg
-                self.metrics_tracker.record_error(error, traceback_text=tb_text)
-                self.metrics_tracker.state = AgentStateEnum.ERROR
-            elif self.agent.hit_net_rate_limit():
-                logger.warning(
-                    "Agent hit rate limit during checkpoint",
-                    checkpoint=checkpoint.name,
-                )
-                self.metrics_tracker.state = AgentStateEnum.HIT_RATE_LIMITED
-                rate_limited = True
-            if (
-                self.run_spec.skip_evaluation
-                or self.run_spec.concurrent_evaluation
-                or result is None
-            ):
-                # Skip inline eval; concurrent mode's bg thread overwrites later.
-                with self._metrics_lock:
-                    self.metrics_tracker.record_checkpoint_result(
-                        checkpoint.name, None
-                    )
-                return AgentCheckpointSummary.from_results(
-                    checkpoint_name=checkpoint.name,
-                    path=checkpoint_save_dir,
-                    snapshot_dir=snapshot_dir,
-                    artifacts=artifacts_path,
-                    usage=self.agent.usage,
-                    had_error=had_error,
-                    pass_policy=self.run_spec.pass_policy,
-                    evaluation_result=None,
+                raise
+        finally:
+            # Hidden tests are materialized only after the inference container
+            # and workspace have been destroyed.
+            try:
+                self._cleanup_checkpoint_session()
+            except BaseException as cleanup_error:  # noqa: BLE001
+                if checkpoint_error is None:
+                    raise
+                _record_secondary_cleanup_error(
+                    checkpoint_error,
+                    cleanup_error,
+                    phase="checkpoint",
                 )
 
-            # Transition to EVALUATING state before starting evaluation
-            if not (had_error or rate_limited):
-                self.metrics_tracker.state = AgentStateEnum.EVALUATING
-            logger.info(
-                "Starting checkpoint evaluation",
+        artifacts_path = get_artifacts_path(
+            checkpoint_save_dir, compress=compress
+        )
+        had_error = result is None or result.had_error
+        rate_limited = False
+        if had_error:
+            if result is None:
+                error = AgentRunnerError(
+                    f"Agent produced no result for checkpoint '{checkpoint.name}'"
+                )
+                tb_text = None
+            else:
+                err_msg = (
+                    result.error_message
+                    or f"Agent reported an unspecified error on '{checkpoint.name}'"
+                )
+                error = AgentRunnerError(err_msg)
+                tb_text = err_msg
+            self.metrics_tracker.record_error(error, traceback_text=tb_text)
+            self.metrics_tracker.state = AgentStateEnum.ERROR
+        elif self.agent.hit_net_rate_limit():
+            logger.warning(
+                "Agent hit rate limit during checkpoint",
                 checkpoint=checkpoint.name,
             )
+            self.metrics_tracker.state = AgentStateEnum.HIT_RATE_LIMITED
+            rate_limited = True
+        if (
+            self.run_spec.skip_evaluation
+            or self.run_spec.concurrent_evaluation
+            or result is None
+        ):
+            # Skip inline eval; concurrent mode's bg thread overwrites later.
+            with self._metrics_lock:
+                self.metrics_tracker.record_checkpoint_result(
+                    checkpoint.name, None
+                )
+            return AgentCheckpointSummary.from_results(
+                checkpoint_name=checkpoint.name,
+                path=checkpoint_save_dir,
+                snapshot_dir=snapshot_dir,
+                artifacts=artifacts_path,
+                usage=self.agent.usage,
+                had_error=had_error,
+                pass_policy=self.run_spec.pass_policy,
+                evaluation_result=None,
+            )
 
+        # Transition to EVALUATING state before starting evaluation
+        if not (had_error or rate_limited):
+            self.metrics_tracker.state = AgentStateEnum.EVALUATING
+        logger.info(
+            "Starting checkpoint evaluation",
+            checkpoint=checkpoint.name,
+        )
+
+        try:
             report, _ = evaluate_agent_snapshot(
                 checkpoint=checkpoint,
                 save_dir=checkpoint_save_dir,
@@ -822,29 +1218,51 @@ class AgentRunner:
                 problem=self.run_spec.problem,
                 environment=self.run_spec.environment,
             )
-            # Record checkpoint evaluation result for progress tracking
-            self.metrics_tracker.record_checkpoint_result(
-                checkpoint.name, report
+        except Exception as evaluation_error:  # noqa: BLE001
+            traceback_text = traceback.format_exc()
+            message = _persist_evaluation_error_preserving_primary(
+                checkpoint.name,
+                checkpoint_save_dir,
+                evaluation_error,
+                traceback_text,
             )
+            self.metrics_tracker.record_checkpoint_result(
+                checkpoint.name,
+                None,
+            )
+            self.metrics_tracker.record_error(
+                evaluation_error,
+                traceback_text=traceback_text,
+            )
+            self.metrics_tracker.state = AgentStateEnum.ERROR
             return AgentCheckpointSummary.from_results(
                 checkpoint_name=checkpoint.name,
                 path=checkpoint_save_dir,
                 snapshot_dir=snapshot_dir,
                 artifacts=artifacts_path,
                 usage=self.agent.usage,
-                had_error=result.had_error,
+                had_error=False,
                 pass_policy=self.run_spec.pass_policy,
-                evaluation_result=report,
+                evaluation_result=None,
+            ).model_copy(
+                update={
+                    "passed_policy": False,
+                    "evaluation_error_message": message,
+                }
             )
-        except BaseException as error:  # noqa: BLE001
-            _save_agent_artifacts_after_checkpoint_error(
-                checkpoint.name,
-                checkpoint_save_dir,
-                self.agent,
-                compress_artifacts=compress,
-                original_error=error,
-            )
-            raise
+        _clear_evaluation_error(checkpoint_save_dir)
+        # Record checkpoint evaluation result for progress tracking
+        self.metrics_tracker.record_checkpoint_result(checkpoint.name, report)
+        return AgentCheckpointSummary.from_results(
+            checkpoint_name=checkpoint.name,
+            path=checkpoint_save_dir,
+            snapshot_dir=snapshot_dir,
+            artifacts=artifacts_path,
+            usage=self.agent.usage,
+            had_error=result.had_error,
+            pass_policy=self.run_spec.pass_policy,
+            evaluation_result=report,
+        )
 
     def _load_checkpoint_summary(
         self,
@@ -871,19 +1289,15 @@ class AgentRunner:
             )
             return None
 
-        try:
-            with result_path.open() as f:
-                result_data = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
+        inference_result = _load_inference_result(result_path)
+        if inference_result is None:
             logger.warning(
-                "Failed to read inference_result.json",
+                "Completed checkpoint has an invalid inference_result.json",
                 checkpoint=checkpoint.name,
-                error=str(e),
             )
             return None
 
         snapshot_dir = checkpoint_save_dir / common.SNAPSHOT_DIR_NAME
-        usage_data = result_data.get("usage", {})
 
         # Load evaluation results if available
         eval_path = checkpoint_save_dir / common.EVALUATION_FILENAME
@@ -925,8 +1339,8 @@ class AgentRunner:
             path=checkpoint_save_dir,
             snapshot_dir=snapshot_dir,
             artifacts=artifacts_path,
-            usage=UsageTracker.model_validate(usage_data),
-            had_error=result_data.get("had_error", False),
+            usage=inference_result.usage,
+            had_error=inference_result.had_error,
             pass_policy=self.run_spec.pass_policy,
             evaluation_result=evaluation_result,
         )
@@ -935,6 +1349,8 @@ class AgentRunner:
         self,
         checkpoint: CheckpointConfig,
         summary: AgentCheckpointSummary,
+        *,
+        preserve_cancellation: bool = False,
     ) -> None:
         """Evaluate one solved snapshot in a background thread (concurrent mode).
 
@@ -950,20 +1366,78 @@ class AgentRunner:
                 problem=self.run_spec.problem,
                 environment=self.run_spec.environment,
             )
-        except Exception as exc:  # noqa: BLE001
+            _clear_evaluation_error(summary.path)
+            with self._metrics_lock:
+                self.metrics_tracker.record_checkpoint_result(
+                    checkpoint.name, report
+                )
+                self._eval_reports[checkpoint.name] = report
+        except BaseException as exc:  # noqa: BLE001
+            if preserve_cancellation and not isinstance(exc, Exception):
+                raise
+            traceback_text = traceback.format_exc()
+            message = _persist_evaluation_error_preserving_primary(
+                checkpoint.name,
+                summary.path,
+                exc,
+                traceback_text,
+            )
             logger.error(
                 "Concurrent evaluation failed",
                 checkpoint=checkpoint.name,
                 exc_info=True,
             )
             with self._metrics_lock:
-                self._failed_evals[checkpoint.name] = repr(exc)
+                self._failed_evals[checkpoint.name] = message
             return
+
+    def _failed_evals_snapshot(self) -> dict[str, str]:
+        """Return a consistent copy of evaluator failures."""
         with self._metrics_lock:
-            self._eval_reports[checkpoint.name] = report
-            self.metrics_tracker.record_checkpoint_result(
-                checkpoint.name, report
+            return dict(self._failed_evals)
+
+    def _repair_checkpoint_evaluation(
+        self,
+        checkpoint: CheckpointConfig,
+        summary: AgentCheckpointSummary,
+    ) -> AgentCheckpointSummary:
+        """Re-evaluate a solved immutable snapshot without agent inference."""
+        logger.info(
+            "Repairing checkpoint evaluation from saved snapshot",
+            checkpoint=checkpoint.name,
+            snapshot=summary.snapshot_dir,
+        )
+        self.metrics_tracker.state = AgentStateEnum.EVALUATING
+        self._eval_one(
+            checkpoint,
+            summary,
+            preserve_cancellation=True,
+        )
+        evaluation_error = self._failed_evals_snapshot().get(checkpoint.name)
+        if evaluation_error is not None:
+            error = EvaluationError(
+                f"Checkpoint evaluation failed: {checkpoint.name}"
             )
+            self.metrics_tracker.record_error(error)
+            self.metrics_tracker.state = AgentStateEnum.ERROR
+            return summary.model_copy(
+                update={
+                    "passed_policy": False,
+                    "evaluation_error_message": evaluation_error,
+                }
+            )
+
+        report = self._eval_reports[checkpoint.name]
+        return AgentCheckpointSummary.from_results(
+            checkpoint_name=summary.checkpoint_name,
+            path=summary.path,
+            snapshot_dir=summary.snapshot_dir,
+            artifacts=summary.artifacts,
+            usage=summary.usage,
+            had_error=summary.had_error,
+            pass_policy=self.run_spec.pass_policy,
+            evaluation_result=report,
+        )
 
     def _merge_eval_reports(
         self, results: list[AgentCheckpointSummary]
@@ -975,9 +1449,21 @@ class AgentRunner:
         """
         if not self.run_spec.concurrent_evaluation:
             return results
+        failed_evals = self._failed_evals_snapshot()
         merged: list[AgentCheckpointSummary] = []
         for summary in results:
             report = self._eval_reports.get(summary.checkpoint_name)
+            evaluation_error = failed_evals.get(summary.checkpoint_name)
+            if evaluation_error is not None:
+                merged.append(
+                    summary.model_copy(
+                        update={
+                            "passed_policy": False,
+                            "evaluation_error_message": evaluation_error,
+                        }
+                    )
+                )
+                continue
             if report is None:
                 merged.append(summary)
                 continue
@@ -993,14 +1479,45 @@ class AgentRunner:
                     evaluation_result=report,
                 )
             )
+        if failed_evals:
+            failed = sorted(failed_evals)
+            error = EvaluationError(
+                "Checkpoint evaluation failed: " + ", ".join(failed)
+            )
+            secondary_error = (
+                f"concurrent evaluation: {type(error).__qualname__}: {error}"
+            )
+            if self.metrics_tracker.error_type is None:
+                self.metrics_tracker.record_error(error)
+            elif (
+                not (
+                    self.metrics_tracker.error_type == type(error).__qualname__
+                    and self.metrics_tracker.error_message == str(error)
+                )
+                and secondary_error not in self.metrics_tracker.secondary_errors
+            ):
+                # A solve or cancellation may already be the run's primary
+                # failure. Keep it primary while still making the background
+                # evaluator failure durable in run_info.yaml. The membership
+                # guard makes the normal _run_problem()/finish() double merge
+                # idempotent.
+                self.metrics_tracker.record_secondary_error(
+                    error,
+                    phase="concurrent evaluation",
+                )
+            self.metrics_tracker.state = AgentStateEnum.ERROR
         return merged
 
     def _run_problem(self) -> list[AgentCheckpointSummary]:
         """Iterate through checkpoints, skipping completed ones if resuming."""
         # Determine checkpoints to skip when resuming
         completed_set: set[str] = set()
+        evaluation_only_set: set[str] = set()
         if self.resume_info:
             completed_set = set(self.resume_info.completed_checkpoints)
+            evaluation_only_set = set(
+                self.resume_info.evaluation_only_checkpoints
+            )
 
         logger.info(
             "Starting problem run",
@@ -1009,7 +1526,10 @@ class AgentRunner:
             skipping=len(completed_set),
         )
 
-        results = []
+        results = self.results
+        prior_snapshot_dir = (
+            self.resume_info.last_snapshot_dir if self.resume_info else None
+        )
         # Rolling background eval thread; previous joined before next starts.
         pending_eval: threading.Thread | None = None
         # Failed evals already surfaced; tracked to avoid re-logging.
@@ -1029,7 +1549,13 @@ class AgentRunner:
                     checkpoint, checkpoint_save_dir
                 )
                 if existing_summary:
+                    if checkpoint.name in evaluation_only_set:
+                        existing_summary = self._repair_checkpoint_evaluation(
+                            checkpoint,
+                            existing_summary,
+                        )
                     results.append(existing_summary)
+                    prior_snapshot_dir = existing_summary.snapshot_dir
                     self.metrics_tracker.current_checkpoint = checkpoint.name
                     self.progress_queue.put(
                         (
@@ -1040,17 +1566,22 @@ class AgentRunner:
                     )
                 continue
 
+            # An evaluation-only repair failure is a harness failure. Do not
+            # spend more model tokens on later invalid solves.
+            if self._failed_evals_snapshot():
+                break
+
             # Surface any concurrent-eval failures that completed since the
             # last cp boundary so a broken eval is visible at the next
             # iteration, not silently absent until end-of-run.
-            with self._metrics_lock:
-                new_fails = set(self._failed_evals) - reported_fails
+            failed_evals = self._failed_evals_snapshot()
+            new_fails = set(failed_evals) - reported_fails
             for cp_name in new_fails:
                 logger.warning(
                     "Concurrent eval failed for earlier checkpoint "
                     "(run continues; final report will show missing eval)",
                     checkpoint=cp_name,
-                    error=self._failed_evals[cp_name],
+                    error=failed_evals[cp_name],
                 )
             reported_fails.update(new_fails)
 
@@ -1064,12 +1595,21 @@ class AgentRunner:
             self.metrics_tracker.current_checkpoint = checkpoint.name
             self.metrics_tracker.checkpoint_started = datetime.now()
 
+            # The first executed checkpoint (including the first after resume)
+            # has no prior agent usage waiting to be reset.
+            if not self._has_executed_checkpoint:
+                self._checkpoint_usage_committed = False
+
             try:
-                summary = self._run_checkpoint(
-                    checkpoint,
-                    checkpoint_save_dir,
-                    idx == 0,
-                )
+                try:
+                    summary = self._run_checkpoint(
+                        checkpoint,
+                        checkpoint_save_dir,
+                        idx == 0,
+                        prior_snapshot_dir,
+                    )
+                finally:
+                    self._commit_checkpoint_usage()
             except BaseException:
                 # Solve raised — make sure any in-flight eval container is
                 # joined before the exception propagates, so its session
@@ -1077,9 +1617,11 @@ class AgentRunner:
                 # shutdown, which would otherwise strand a docker container.
                 if pending_eval is not None:
                     pending_eval.join()
+                    self._pending_eval_thread = None
                 raise
             results.append(summary)
-            self.metrics_tracker.finish_checkpoint(self.agent.usage)
+            self._has_executed_checkpoint = True
+            prior_snapshot_dir = summary.snapshot_dir
 
             logger.info(
                 "Checkpoint finished",
@@ -1099,40 +1641,48 @@ class AgentRunner:
             ):
                 if pending_eval is not None:
                     pending_eval.join()
-                pending_eval = threading.Thread(
+                next_eval = threading.Thread(
                     target=self._eval_one,
                     args=(checkpoint, summary),
                     name=f"eval-{checkpoint.name}",
                     daemon=True,
                 )
-                pending_eval.start()
+                next_eval.start()
+                pending_eval = next_eval
+                self._pending_eval_thread = next_eval
 
             # Check for early termination
             if self._should_early_stop(summary):
                 if pending_eval is not None:
                     pending_eval.join()
+                    self._pending_eval_thread = None
                 return self._merge_eval_reports(results)
 
         # Wait for the final bg eval and fold reports (no-op when off).
         if pending_eval is not None:
             pending_eval.join()
+            self._pending_eval_thread = None
         results = self._merge_eval_reports(results)
 
         # End-of-run summary of any concurrent-eval failures. They've already
         # been logged at the cp boundary, but a single summary line at the
         # end makes them easy to grep from chain logs.
-        if self._failed_evals:
+        failed_evals = self._failed_evals_snapshot()
+        if failed_evals:
             logger.warning(
                 "Run completed with concurrent eval failures",
-                failed_checkpoints=sorted(self._failed_evals.keys()),
-                count=len(self._failed_evals),
+                failed_checkpoints=sorted(failed_evals),
+                count=len(failed_evals),
             )
 
         logger.info(
             "All checkpoints completed successfully",
             problem=self.run_spec.problem.name,
         )
-        self.metrics_tracker.state = AgentStateEnum.COMPLETED
+        if failed_evals:
+            self.metrics_tracker.state = AgentStateEnum.ERROR
+        else:
+            self.metrics_tracker.state = AgentStateEnum.COMPLETED
         return results
 
 
@@ -1172,10 +1722,22 @@ def agent_progress_watcher(
         prev_net_tokens = agent.usage.net_tokens
 
         prev_state = metrics_tracker.state
+        if metrics_tracker.state in {
+            AgentStateEnum.FAILED,
+            AgentStateEnum.ERROR,
+            AgentStateEnum.HIT_RATE_LIMITED,
+            AgentStateEnum.COMPLETED,
+        }:
+            # The terminal metrics snapshot already includes the final
+            # checkpoint. Sending that checkpoint as agent_usage as well makes
+            # the live renderer count its cost twice.
+            agent_usage = UsageTracker()  # type: ignore[call-arg]
+        else:
+            agent_usage = agent.usage.model_copy(deep=True)
         progress_queue.put(
             (
                 problem_name,
-                agent.usage.model_copy(deep=True),
+                agent_usage,
                 metrics_tracker.model_copy(deep=True),
             )
         )

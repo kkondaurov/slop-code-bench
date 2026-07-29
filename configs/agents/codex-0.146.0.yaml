@@ -1,0 +1,14 @@
+type: codex
+binary: codex
+version: 0.146.0
+npm_package_integrity: sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==
+npm_linux_arm64_integrity: sha512-qiYDxkkEFnXG7joadJW6Q+XcgyDXCpGdpa9nk/c+i0gEomur1j7bHvx12NfWWCF/y8Tqri6ay+FLuC2MjdehtA==
+npm_linux_x64_integrity: sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==
+timeout: 7200
+extra_args: []
+env: {}
+cost_limits:
+  cost_limit: 0
+  step_limit: 0
+  net_cost_limit: 0
+  max_retries: 2

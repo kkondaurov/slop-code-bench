@@ -6,16 +6,23 @@ import json
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock
+from unittest.mock import patch
 
+import pytest
 import yaml
 
 from slop_code.agent_runner.agent import CheckpointInferenceResult
 from slop_code.agent_runner.models import UsageTracker
+from slop_code.agent_runner.reporting import AgentCheckpointSummary
 from slop_code.agent_runner.reporting import CheckpointState
 from slop_code.agent_runner.reporting import RunSummary
+from slop_code.agent_runner.reporting import _validate_saved_run_info
+from slop_code.agent_runner.reporting import _write_run_info_atomically
 from slop_code.agent_runner.reporting import save_agent_checkpoint_info
 from slop_code.agent_runner.reporting import save_results
 from slop_code.agent_runner.state import AgentStateEnum
+from slop_code.common import to_relative_path
+from slop_code.common.atomic import UnsafeAtomicWriteError
 from slop_code.common.llms import TokenUsage
 from slop_code.evaluation import PassPolicy
 
@@ -80,6 +87,163 @@ class TestRunSummary:
 
         assert isinstance(summary.started, datetime)
         assert isinstance(summary.ended, datetime)
+
+
+class TestAgentCheckpointSummary:
+    def test_no_evaluation_does_not_hide_inference_error(
+        self, tmp_path: Path
+    ) -> None:
+        summary = AgentCheckpointSummary.from_results(
+            checkpoint_name="checkpoint_1",
+            path=tmp_path,
+            snapshot_dir=tmp_path / "snapshot",
+            artifacts=tmp_path / "agent",
+            usage=_make_usage_tracker(),
+            had_error=True,
+            pass_policy=PassPolicy.ANY_CASE,
+            evaluation_result=None,
+        )
+
+        assert summary.passed_policy is False
+
+    def test_infrastructure_failure_never_passes_policy(
+        self, tmp_path: Path
+    ) -> None:
+        evaluation = Mock()
+        evaluation.infrastructure_failure = True
+        evaluation.pass_counts = {"Core": 1}
+        evaluation.total_counts = {"Core": 1}
+
+        summary = AgentCheckpointSummary.from_results(
+            checkpoint_name="checkpoint_1",
+            path=tmp_path,
+            snapshot_dir=tmp_path / "snapshot",
+            artifacts=tmp_path / "agent",
+            usage=_make_usage_tracker(),
+            had_error=False,
+            pass_policy=PassPolicy.ANY_CASE,
+            evaluation_result=evaluation,
+        )
+
+        assert summary.passed_policy is False
+
+
+def test_atomic_run_info_replacement_preserves_malformed_evidence(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "run_info.yaml"
+    malformed = "summary: [truncated"
+    target.write_text(malformed, encoding="utf-8")
+
+    _write_run_info_atomically(target, {"summary": {"state": "completed"}})
+
+    assert yaml.safe_load(target.read_text()) == {
+        "summary": {"state": "completed"}
+    }
+    backups = list(tmp_path.glob("run_info.corrupt-*.yaml"))
+    assert len(backups) == 1
+    assert backups[0].read_text() == malformed
+    assert not (tmp_path / ".run_info.yaml.tmp").exists()
+
+
+def test_atomic_run_info_preserves_mapping_shaped_semantic_corruption(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "run_info.yaml"
+    malformed = "summary:\n  state: completed\n"
+    target.write_text(malformed, encoding="utf-8")
+
+    _write_run_info_atomically(target, {"summary": {"state": "error"}})
+
+    backups = list(tmp_path.glob("run_info.corrupt-*.yaml"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == malformed
+
+
+def test_atomic_run_info_write_failure_preserves_existing_file(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "run_info.yaml"
+    original = "summary:\n  state: running\n"
+    target.write_text(original, encoding="utf-8")
+
+    with (
+        patch(
+            "slop_code.agent_runner.reporting.yaml.dump",
+            side_effect=OSError("disk full"),
+        ),
+        pytest.raises(OSError, match="disk full"),
+    ):
+        _write_run_info_atomically(
+            target,
+            {"summary": {"state": "completed"}},
+        )
+
+    assert target.read_text() == original
+    assert not (tmp_path / ".run_info.yaml.tmp").exists()
+
+
+def test_atomic_run_info_write_failure_restores_non_file_target(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "run_info.yaml"
+    target.mkdir()
+    (target / "evidence.txt").write_text("preserve me", encoding="utf-8")
+
+    with (
+        patch(
+            "slop_code.agent_runner.reporting.atomic_write_text",
+            side_effect=OSError("disk full"),
+        ),
+        pytest.raises(OSError, match="disk full"),
+    ):
+        _write_run_info_atomically(
+            target,
+            {"summary": {"state": "completed"}},
+        )
+
+    assert target.is_dir()
+    assert (target / "evidence.txt").read_text(encoding="utf-8") == (
+        "preserve me"
+    )
+    assert not list(tmp_path.glob("run_info.corrupt-*.yaml"))
+
+
+def test_atomic_run_info_rejects_symlink_without_copying_target(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.write_text("private evidence", encoding="utf-8")
+    target = tmp_path / "run_info.yaml"
+    target.symlink_to(outside)
+
+    with pytest.raises(UnsafeAtomicWriteError, match="symlink target"):
+        _write_run_info_atomically(
+            target,
+            {"summary": {"state": "completed"}},
+        )
+
+    assert outside.read_text(encoding="utf-8") == "private evidence"
+    assert not list(tmp_path.glob("run_info.corrupt-*.yaml"))
+
+
+def test_run_info_validation_rejects_mixed_timestamp_domains() -> None:
+    usage = _make_usage_tracker()
+    run_info = {
+        "summary": {
+            "started": "2026-01-01T00:00:00",
+            "ended": "2026-01-01T00:00:00+00:00",
+            "duration_seconds": 0.0,
+            "total_cost": usage.cost,
+            "total_steps": usage.steps,
+            "total_usage": usage.model_dump(),
+            "checkpoints": {},
+            "state": "completed",
+            "passed_policy": True,
+        }
+    }
+
+    assert _validate_saved_run_info(run_info) is None
 
 
 class TestCheckpointInferenceResultPaths:
@@ -153,7 +317,7 @@ class TestSaveAgentCheckpointInfo:
             saved_data = json.load(f)
 
         # Verify path fields are populated
-        assert saved_data["checkpoint_path"] == str(tmp_path)
+        assert saved_data["checkpoint_path"] == to_relative_path(tmp_path)
         assert saved_data["snapshot_dir"] == "snapshot"
         assert saved_data["artifacts_dir"] == "agent"
 
@@ -282,3 +446,44 @@ class TestSaveResults:
         # Verify checkpoint has error state
         assert result["summary"]["checkpoints"]["checkpoint_1"] == "error"
         assert result["summary"]["error_type"] == "RuntimeError"
+
+    def test_genuine_evaluation_error_has_distinct_state(
+        self, tmp_path: Path
+    ) -> None:
+        checkpoint_summary = Mock()
+        checkpoint_summary.checkpoint_name = "checkpoint_1"
+        checkpoint_summary.passed_policy = False
+        checkpoint_summary.had_error = False
+        checkpoint_summary.evaluation_error_message = "evaluator crashed"
+
+        metrics_tracker = Mock()
+        metrics_tracker.state = AgentStateEnum.ERROR
+        metrics_tracker.usage = _make_usage_tracker()
+        metrics_tracker.started = datetime.now()
+        metrics_tracker.error_type = "EvaluationError"
+        metrics_tracker.error_message = "evaluator crashed"
+        metrics_tracker.error_traceback = "..."
+
+        run_spec = Mock()
+        run_spec.problem.name = "test_problem"
+        run_spec.problem.checkpoints = {"checkpoint_1": Mock()}
+        run_spec.model_dump.return_value = {
+            "seed": 42,
+            "pass_policy": "any-case",
+            "skip_evaluation": False,
+            "environment": {},
+            "problem": {},
+        }
+        run_spec.skip_evaluation = False
+
+        result = save_results(
+            results=[checkpoint_summary],
+            metrics_tracker=metrics_tracker,
+            run_spec=run_spec,
+            output_path=tmp_path,
+        )
+
+        assert result["summary"]["checkpoints"] == {
+            "checkpoint_1": "evaluation_error"
+        }
+        assert result["summary"]["passed_policy"] is False

@@ -16,7 +16,6 @@ The models provide the foundation for both Docker and local runtime implementati
 from __future__ import annotations
 
 import os
-import tempfile
 import uuid
 from collections.abc import Mapping
 from pathlib import Path
@@ -24,8 +23,10 @@ from pathlib import Path
 from pydantic import BaseModel
 from pydantic import ConfigDict
 from pydantic import Field
+from pydantic import field_serializer
 
 from slop_code.common import WORKSPACE_TEST_DIR
+from slop_code.common.temp import temporary_root_path
 from slop_code.execution.assets import ResolvedStaticAsset
 from slop_code.logging import get_logger
 
@@ -146,6 +147,14 @@ class SnapshotConfig(BaseModel):
         default=None,
         description="Directory to save snapshot archives.",
     )
+
+    @field_serializer("keep_globs", "ignore_globs", when_used="json")
+    def serialize_globs(
+        self,
+        value: set[str] | None,
+    ) -> list[str] | None:
+        """Serialize unordered glob sets deterministically."""
+        return None if value is None else sorted(value)
 
 
 class LocalConfig(BaseModel):
@@ -331,6 +340,7 @@ class EnvironmentSpec(BaseModel):
         """
         if self.snapshot.archive_save_dir is None:
             return Path(
-                tempfile.gettempdir(), f"slop_code_{uuid.uuid4().hex[:8]}"
+                temporary_root_path(),
+                f"slop_code_{uuid.uuid4().hex[:8]}",
             )
         return self.snapshot.archive_save_dir
