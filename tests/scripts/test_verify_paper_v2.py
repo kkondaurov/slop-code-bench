@@ -53,13 +53,14 @@ def test_checked_in_lock_and_manifest_agree() -> None:
     assert sum(lock["problems"].values()) == 196
     assert lock["schema_version"] == 2
     assert lock["hash_algorithm"] == MODULE.HASH_ALGORITHM
+    assert manifest["suite_revision"] == "v2.1"
     assert manifest["catalog"]["release"] == lock["source"]["release"]
     assert manifest["catalog"]["commit"] == lock["source"]["commit"]
     environment_path = (
         ROOT
         / "configs"
         / "environments"
-        / "docker-python3.12-uv-scb-v2.yaml"
+        / "docker-python3.12-uv-scb-v2.1.yaml"
     )
     assert (
         manifest["protocol"]["environment_sha256"]
@@ -141,6 +142,7 @@ def test_suite_manifest_verifier_rejects_profile_sri_drift(
     ("path", "value", "expected_error"),
     [
         (("schema_version",), 99, "suite manifest schema version mismatch"),
+        (("suite_revision",), "v2", "suite manifest revision mismatch"),
         (("paper", "arxiv_id"), "wrong", "suite manifest paper arxiv_id mismatch"),
         (
             ("runner", "repository"),
@@ -353,48 +355,32 @@ def test_missing_managed_manifest_gives_frozen_sync_command(
     assert errors == [
         "managed catalog manifest is missing: "
         f"{tmp_path / 'manifest.json'}; "
-        "run `UV_NO_CONFIG=1 uv run --frozen slop-code sync v1.0`"
+            "run `UV_NO_CONFIG=1 uv run --frozen slop-code sync v1.0.1`"
     ]
 
 
 def test_profile_configs_resolve_to_declared_semantics() -> None:
     catalog_problems = list(MODULE.load_lock()["problems"])
-    cases = {
-        "paper-v2-reference.yaml": (
-            "paper-v2-reference",
-            "0.124.0",
-            "high",
-            36,
-        ),
-        "paper-v2-reference-diagnostic.yaml": (
-            "paper-v2-reference",
-            "0.124.0",
-            "high",
-            2,
-        ),
-        "gpt-5.5-current-xhigh.yaml": (
-            "gpt-5.5-current-xhigh",
-            "0.146.0",
-            "xhigh",
-            36,
-        ),
-        "gpt-5.5-current-xhigh-diagnostic.yaml": (
-            "gpt-5.5-current-xhigh",
-            "0.146.0",
-            "xhigh",
-            2,
-        ),
+    manifest = yaml.safe_load(
+        (ROOT / "configs/scbench-v2/manifest.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    expected_problems = {
+        "config": catalog_problems,
+        "diagnostic_config": list(manifest["diagnostic_subset"]["problems"]),
+        "capability_config": list(manifest["capability_subset"]["problems"]),
     }
-    for filename, expected in cases.items():
-        profile, version, thinking, problem_count = expected
-        config = load_run_config(ROOT / "configs" / "runs" / filename)
-        assert config.profile == profile
-        assert config.agent["version"] == version
-        assert config.model.provider == "codex_auth"
-        assert config.model.name == "gpt-5.5"
-        assert config.thinking == thinking
-        assert len(config.problems) == problem_count
-        if problem_count == 2:
-            assert config.problems == ["mvvault", "xjq"]
-        else:
-            assert config.problems == catalog_problems
+
+    for profile_name, profile in manifest["profiles"].items():
+        for config_field, problems in expected_problems.items():
+            relative_path = profile.get(config_field)
+            if relative_path is None:
+                continue
+            config = load_run_config(ROOT / relative_path)
+            assert config.profile == profile_name
+            assert config.agent["version"] == profile["cli_version"]
+            assert config.model.provider == profile["provider"]
+            assert config.model.name == profile["model"]
+            assert config.thinking == profile["reasoning"]
+            assert config.problems == problems

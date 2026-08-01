@@ -66,6 +66,46 @@ an infrastructure failure as model behavior:
   to scrub semantic uv overrides; the two failed attempts are retained as
   preflight evidence and incurred no model spend.
 
+## v2.1 catalog repair gate
+
+The first capability-panel runs exposed defects in the upstream `v1.0`
+catalog. Those runs are not benchmark baselines. The repaired catalog is the
+fork release
+[`v1.0.1`](https://github.com/kkondaurov/scb-problems/releases/tag/v1.0.1)
+at commit `9b4864d6bdefd8cd0f2d66d3eb0d1972914aefd3`, based on current
+upstream `main` commit `ef6a9dd`.
+
+The repair scope is limited to reproduced contradictions and infrastructure
+failures in the capability-11 panel: writable database seeds, statements that
+disagreed with their tests, skipped lifecycle behavior in the dynamic-config
+tests, invalid trajectory fixtures, brittle SheetEval diagnostic matching,
+SheetEval fatal-prerequisite and HTML-output prose that contradicted the
+reference and tests, and the Mocked HTTP test harness losing already-buffered
+stderr lines. Reference
+solution changes are confined to Dynamic Config, whose corrected lifecycle
+tests exposed a genuine version-zero inconsistency in its reference. Dynamic
+Buffer and Test Translator remain byte-for-byte upstream. No checkpoint intent
+or expected outcome was changed.
+
+All repair validation used the benchmark's sanctioned `tools run-case`
+evaluator. Cumulative reference results were Database Migration 136 passed with
+one pre-existing platform skip, DataGate 405/405, Dynamic Config 84/84, EVE
+Market Tools 76/76, Forge 295/295, SheetEval 164/164, and Trajectory API
+375/375; the two Mocked HTTP cases exercising the repaired reader passed 2/2.
+Problem tests were never invoked directly with pytest.
+
+The v2.1 base adds a lock-installed Node 22.21.1, `tsx` 4.23.1, and TypeScript
+7.0.2 toolchain so generated TypeScript is compiled strictly without on-demand
+`npx` downloads. Its verified local image is:
+
+- image ID:
+  `sha256:f92550022dbc45c417e0c5bfcab706411b7407881ffd2d9b74d4e2049bbce985`
+- platform: `linux/arm64`
+- release archive SHA256:
+  `eac1f5965f0c563529861a8b7b62fd2e2c0de6f726ffcdf38bcd8538eb145a44`
+- catalog tree SHA256:
+  `263199721db8c873aef0643224d244712fd5f56f4565198bf4cefd0e65211f8c`
+
 Repairs are covered by adversarial tests for the reproduced failure modes.
 The final snapshot format preserves safe relative symlinks, executable modes,
 file/directory/symlink mtimes, and empty directories; unsafe archive paths,
@@ -101,8 +141,12 @@ Confirmed release gates:
   UV_CACHE_DIR=/private/tmp/slopcodebench-uv-cache uv run --frozen pytest -q`:
   2,058 passed, 18 warnings.
 - `UV_NO_CONFIG=1 uv run --frozen python scripts/verify_paper_v2.py`: 36
-  problems, 196 checkpoints, catalog tree
-  `199ae38f7dc07b5bbaba3683ca98e783c3a800f27ee4b1075fa2fa14d32d1249`.
+  problems, 196 checkpoints, 6,184 files, catalog tree
+  `263199721db8c873aef0643224d244712fd5f56f4565198bf4cefd0e65211f8c`.
+- Runner regression tests passed 173/173 with one intentional skip. The wider
+  non-integration suite passed 2,030 tests in the restricted sandbox; its two
+  uvx-dependent cases passed separately once the temporary tool cache was
+  populated with network access.
 - Both named diagnostic profiles passed non-mutating `--dry-run` preflight:
   `paper-v2-reference-diagnostic.yaml` and
   `gpt-5.5-current-xhigh-diagnostic.yaml`.
@@ -124,11 +168,13 @@ Confirmed release gates:
 
 ## Reproduction boundaries
 
-- The catalog bytes are exact for `scb-problems` release `v1.0`; the runner is
-  based on public upstream commit `13de1a7` plus the reviewed fixes in this
-  fork, published as
-  [`scbench-v2-repro.4`](https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2-repro.4).
-  It is not the unpublished byte-exact paper runner.
+- The catalog bytes are exact for fork release `v1.0.1`, based on catalog
+  upstream `main` commit `ef6a9dd`. The runner is based on public upstream
+  commit `13de1a7` plus
+  reviewed fixes in this fork, published as
+  [`scbench-v2.1-repro.1`](https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2.1-repro.1).
+  It is not the unpublished byte-exact paper runner, and old `v1.0` capability
+  runs are not v2.1 benchmark baselines.
 - `scb-check==0.1.3` is a pinned reconstruction choice because the paper did
   not publish the evaluator version.
 - The published base artifact is arm64-only. An amd64 result requires a

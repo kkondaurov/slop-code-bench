@@ -1,13 +1,13 @@
-profile: gpt-5.5-current-xhigh
+profile: gpt-5.6-terra-high
 agent: codex-0.146.0
 environment: docker-python3.12-uv-scb-v2.1
 prompt: just-solve
 
 model:
   provider: codex_auth
-  name: gpt-5.5
+  name: gpt-5.6-terra
 
-thinking: xhigh
+thinking: high
 pass_policy: any-case
 one_shot:
   enabled: false
@@ -50,5 +50,5 @@ problems:
   - trajectory_api
   - xjq
 
-save_dir: outputs/experiments/gpt-5.5-current-xhigh
+save_dir: outputs/experiments/gpt-5.6-terra-high-v2.1
 save_template: "${model.name}/${agent.type}-${agent.version}_${prompt}_${thinking}_${now:%Y%m%dT%H%M%S}"

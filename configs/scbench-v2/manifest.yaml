@@ -1,5 +1,6 @@
 schema_version: 1
 id: scbench-v2
+suite_revision: v2.1
 
 paper:
   arxiv_id: "2603.24755"
@@ -10,63 +11,82 @@ runner:
   repository: https://github.com/kkondaurov/slop-code-bench
   upstream_repository: https://github.com/SprocketLab/slop-code-bench
   base_commit: 13de1a7a6b8b3dc5cc532a0c322a0997afa5bec7
-  release_tag: scbench-v2-repro.4
-  release_url: https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2-repro.4
+  release_tag: scbench-v2.1-repro.1
+  release_url: https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2.1-repro.1
   selection: >-
     Current upstream base selected for the reproducible fork. It includes
-    post-paper correctness fixes and is therefore not claimed to be the
-    unpublished byte-exact runner used to produce the paper table.
+    post-paper correctness fixes. This fork adds the v2.1 catalog-integrity
+    checks and is not claimed to be the unpublished byte-exact runner used to
+    produce the paper table.
 
 catalog:
-  repository: https://github.com/gabeorlanski/scb-problems
-  release: v1.0
-  commit: 4d38d300059667d57e43c31969bc455f5c338b52
+  repository: https://github.com/kkondaurov/scb-problems
+  upstream_repository: https://github.com/gabeorlanski/scb-problems
+  release: v1.0.1
+  commit: 9b4864d6bdefd8cd0f2d66d3eb0d1972914aefd3
   problem_count: 36
   checkpoint_count: 196
   content_lock: configs/scbench-v2/content-lock.json
   content_lock_schema_version: 2
-  content_lock_sha256: 44053279981dca44397c4e174809d0f199d56706ed51983ba6020315cd09969a
+  content_lock_sha256: c231f6d2a0bb767ed06e02209db35ccb119db598ef10c2f166c0b287c2a8c6d5
   hash_algorithm: sha256-length-prefixed-mode-v2
   note: >-
-    The problem repository calls this release v1.0. It is the catalog used by
-    the v2 revision of arXiv:2603.24755; the two version labels describe
-    different artifacts and are not contradictory.
+    Fork release v1.0.1 is based on upstream main commit ef6a9dd and repairs
+    confirmed capability-11 defects without changing checkpoint intent or
+    expected outcomes. Earlier runs on superseded catalog bytes are not
+    comparable and are not retained as v2.1 benchmark results.
 
 protocol:
-  environment: docker-python3.12-uv-scb-v2
-  environment_sha256: 1168bd4dbaec9d54c04f1e1606711bec22c46d0d8493dcb47b381a646de39910
+  environment: docker-python3.12-uv-scb-v2.1
+  environment_sha256: 0bac802380fbab926394317312750a5bfc4ff6f000b262e127c72412d697c18c
   source_image:
     reference: ghcr.io/astral-sh/uv:python3.12-trixie-slim
     pinned: ghcr.io/astral-sh/uv@sha256:519357e414a4240af8b3ac657466c20f9d6041b5a3ce999d96fa9d576ef7fd29
     digest: sha256:519357e414a4240af8b3ac657466c20f9d6041b5a3ce999d96fa9d576ef7fd29
     role: immutable parent input to the base-image setup recipe
   prebuilt_base:
-    reference: sha256:d2b862aad2bf40fe80573d0facc462608ce2a2fe76b56927a36050dc02a44f14
-    image_id: sha256:d2b862aad2bf40fe80573d0facc462608ce2a2fe76b56927a36050dc02a44f14
+    reference: sha256:f92550022dbc45c417e0c5bfcab706411b7407881ffd2d9b74d4e2049bbce985
+    image_id: sha256:f92550022dbc45c417e0c5bfcab706411b7407881ffd2d9b74d4e2049bbce985
     platform: linux/arm64
     architecture: arm64
-    image_size_bytes: 1126378457
+    image_size_bytes: 1168212604
     bundled_tools:
+      node_toolchain:
+        lock: src/slop_code/execution/docker_runtime/base_node_tools/package-lock.json
+        lock_sha256: 96d0bb1da2dc901a99b560a6b4955f21eba9233d76737448bf92767f5f3d25e4
       minio:
         release: RELEASE.2025-09-07T16-13-09Z
         architecture: arm64
         sha256: 5c83cd2cf151717ba0243f73e1c7802ff36e272b67144bdd7f1f7d684fd6f03d
         runtime: linux/arm64
+      node:
+        version: 22.21.1
+        runtime: linux/arm64
+      tsx:
+        version: 4.23.1
+        package_integrity: >-
+          sha512-GQHnkIfxyx1wYCOS/wonik5MVRZU9hi1TEZmzGZSCJB1y9YgoZ8H6itNE/u4suE+yLmOzuE4E5S4TZ/ZX2wcWQ==
+        runtime: linux/arm64
+      typescript:
+        version: 7.0.2
+        package_integrity: >-
+          sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA==
+        runtime: linux/arm64
     archive:
-      path: outputs/reproducibility-images/slopcodebench-base-scb-v2-linux-arm64-image-d2b862aad2bf.tar.zst
-      checksum_file: configs/scbench-v2/release-assets.sha256
-      download_url: https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2-repro.4/slopcodebench-base-scb-v2-linux-arm64-image-d2b862aad2bf.tar.zst
-      checksum_url: https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2-repro.4/release-assets.sha256
-      size_bytes: 1097630979
-      sha256: dff52ff24d1d7e7d88525ef403b374d6464d3331c2b3df1ce72e4d56a3ec5df9
+      path: outputs/reproducibility-images/slopcodebench-base-scb-v2.1-linux-arm64-image-f92550022dbc.tar.zst
+      checksum_file: configs/scbench-v2/release-assets-v2.1.sha256
+      download_url: https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2.1-repro.1/slopcodebench-base-scb-v2.1-linux-arm64-image-f92550022dbc.tar.zst
+      checksum_url: https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2.1-repro.1/release-assets-v2.1.sha256
+      size_bytes: 1139580050
+      sha256: eac1f5965f0c563529861a8b7b62fd2e2c0de6f726ffcdf38bcd8538eb145a44
       compression: zstd
       integrity_check: clean
-      loader: scripts/load_scbench_v2_base.sh
+      loader: scripts/load_scbench_v2_1_base.sh
     publication_status: published
     note: >-
       This is the fully built Docker image after applying the environment
       setup recipe, not the upstream parent manifest digest. The verified
-      archive is published with the scbench-v2-repro.4 GitHub release.
+      archive is published with the scbench-v2.1-repro.1 GitHub release.
   prompt: just-solve
   prompt_sha256: 663d8920c1f88f30f9fc51ff47328a083a61fd13e6db082a9707613a6aa725e3
   seed: 42
@@ -113,7 +133,7 @@ quality_evaluator:
 
 profiles:
   paper-v2-reference:
-    classification: reference-aligned diagnostic
+    classification: historical configuration reference
     config: configs/runs/paper-v2-reference.yaml
     diagnostic_config: configs/runs/paper-v2-reference-diagnostic.yaml
     model: gpt-5.5
@@ -140,13 +160,14 @@ profiles:
           sha512-cJ4QfQIrz2gkXVWephiGo9JDyD3qLKhvkTTLk7gI8rKd7MZpVXn9/1e7pZCQnJVA7Dk6ocA5G+sxnR78SoIejw==
     semantics: >-
       Matches the paper's published GPT-5.5 model, CLI version, prompt, and
-      reasoning setting. The selected runner contains documented post-paper
-      fixes, so results are a reference-aligned replication, not a byte-exact
-      recreation of an unpublished runner environment.
+      reasoning setting. The selected runner and repaired v2.1 catalog contain
+      documented post-paper fixes, so results are not a reproduction of the
+      paper table or its unpublished runner environment.
   gpt-5.5-current-xhigh:
     classification: extension experiment
     config: configs/runs/gpt-5.5-current-xhigh.yaml
     diagnostic_config: configs/runs/gpt-5.5-current-xhigh-diagnostic.yaml
+    capability_config: configs/runs/gpt-5.5-current-xhigh-capability-11.yaml
     model: gpt-5.5
     provider: codex_auth
     harness: Codex CLI
@@ -174,8 +195,213 @@ profiles:
           sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==
     semantics: >-
       Measures a newer Codex harness and a larger reasoning budget on the
-      frozen v2 catalog. It must not be presented as a reproduction of the
+      repaired v2.1 catalog. It must not be presented as a reproduction of the
       paper's GPT-5.5 row.
+  gpt-5.6-luna-xhigh:
+    classification: extension experiment
+    config: configs/runs/gpt-5.6-luna-xhigh.yaml
+    diagnostic_config: configs/runs/gpt-5.6-luna-xhigh-diagnostic.yaml
+    capability_config: configs/runs/gpt-5.6-luna-xhigh-capability-11.yaml
+    model: gpt-5.6-luna
+    provider: codex_auth
+    harness: Codex CLI
+    agent_type: codex
+    agent_config: configs/agents/codex-0.146.0.yaml
+    agent_config_sha256: c7c70d079f37ccc74e7bbb1010a8afd937a6a8a70c96f43d1acd045481df7a94
+    model_config: configs/models/gpt-5.6-luna.yaml
+    model_config_sha256: 1bf4f56010aa59537253ad232d8b80a3ec4a848db1923927ceb220921805753d
+    cli_version: 0.146.0
+    reasoning: xhigh
+    release_evidence:
+      registry: https://registry.npmjs.org/@openai%2Fcodex/0.146.0
+      checked_at: "2026-07-29T11:24:57Z"
+      published_at: "2026-07-29T01:42:51Z"
+      prerelease: false
+      package_integrity: >-
+        sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==
+      platform_alias_targets:
+        linux_arm64: "@openai/codex@0.146.0-linux-arm64"
+        linux_x64: "@openai/codex@0.146.0-linux-x64"
+      platform_integrity:
+        linux_arm64: >-
+          sha512-qiYDxkkEFnXG7joadJW6Q+XcgyDXCpGdpa9nk/c+i0gEomur1j7bHvx12NfWWCF/y8Tqri6ay+FLuC2MjdehtA==
+        linux_x64: >-
+          sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==
+    semantics: >-
+      Measures GPT-5.6 Luna with the current Codex harness and an xhigh
+      reasoning budget on the repaired v2.1 catalog. Capability-11 runs are
+      extension experiments, not paper-table reproductions.
+  gpt-5.6-sol-medium:
+    classification: extension experiment
+    config: configs/runs/gpt-5.6-sol-medium.yaml
+    diagnostic_config: configs/runs/gpt-5.6-sol-medium-diagnostic.yaml
+    capability_config: configs/runs/gpt-5.6-sol-medium-capability-11.yaml
+    model: gpt-5.6-sol
+    provider: codex_auth
+    harness: Codex CLI
+    agent_type: codex
+    agent_config: configs/agents/codex-0.146.0.yaml
+    agent_config_sha256: c7c70d079f37ccc74e7bbb1010a8afd937a6a8a70c96f43d1acd045481df7a94
+    model_config: configs/models/gpt-5.6-sol.yaml
+    model_config_sha256: 4aa9a04a582e7cd36d3890ce0aa7f59c6d3931c4cda90f8a38060e343f56fd6e
+    cli_version: 0.146.0
+    reasoning: medium
+    release_evidence:
+      registry: https://registry.npmjs.org/@openai%2Fcodex/0.146.0
+      checked_at: "2026-07-29T11:24:57Z"
+      published_at: "2026-07-29T01:42:51Z"
+      prerelease: false
+      package_integrity: >-
+        sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==
+      platform_alias_targets:
+        linux_arm64: "@openai/codex@0.146.0-linux-arm64"
+        linux_x64: "@openai/codex@0.146.0-linux-x64"
+      platform_integrity:
+        linux_arm64: >-
+          sha512-qiYDxkkEFnXG7joadJW6Q+XcgyDXCpGdpa9nk/c+i0gEomur1j7bHvx12NfWWCF/y8Tqri6ay+FLuC2MjdehtA==
+        linux_x64: >-
+          sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==
+    semantics: >-
+      Measures GPT-5.6 Sol with the current Codex harness and a medium
+      reasoning budget on the repaired v2.1 catalog. Capability-11 runs are
+      extension experiments, not paper-table reproductions.
+  gpt-5.6-terra-high:
+    classification: extension experiment
+    config: configs/runs/gpt-5.6-terra-high.yaml
+    diagnostic_config: configs/runs/gpt-5.6-terra-high-diagnostic.yaml
+    capability_config: configs/runs/gpt-5.6-terra-high-capability-11.yaml
+    model: gpt-5.6-terra
+    provider: codex_auth
+    harness: Codex CLI
+    agent_type: codex
+    agent_config: configs/agents/codex-0.146.0.yaml
+    agent_config_sha256: c7c70d079f37ccc74e7bbb1010a8afd937a6a8a70c96f43d1acd045481df7a94
+    model_config: configs/models/gpt-5.6-terra.yaml
+    model_config_sha256: 4c1f5f8c15cf9425279127f47fb8c1bd9fc0b0d2c4d89d0625fec6102026e0c0
+    cli_version: 0.146.0
+    reasoning: high
+    release_evidence:
+      registry: https://registry.npmjs.org/@openai%2Fcodex/0.146.0
+      checked_at: "2026-07-29T11:24:57Z"
+      published_at: "2026-07-29T01:42:51Z"
+      prerelease: false
+      package_integrity: >-
+        sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==
+      platform_alias_targets:
+        linux_arm64: "@openai/codex@0.146.0-linux-arm64"
+        linux_x64: "@openai/codex@0.146.0-linux-x64"
+      platform_integrity:
+        linux_arm64: >-
+          sha512-qiYDxkkEFnXG7joadJW6Q+XcgyDXCpGdpa9nk/c+i0gEomur1j7bHvx12NfWWCF/y8Tqri6ay+FLuC2MjdehtA==
+        linux_x64: >-
+          sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==
+    semantics: >-
+      Measures GPT-5.6 Terra with the current Codex harness and a high
+      reasoning budget on the repaired v2.1 catalog. Capability-11 runs are
+      extension experiments, not paper-table reproductions.
+
+  gpt-5.6-sol-high:
+    classification: extension experiment
+    config: configs/runs/gpt-5.6-sol-high.yaml
+    diagnostic_config: configs/runs/gpt-5.6-sol-high-diagnostic.yaml
+    capability_config: configs/runs/gpt-5.6-sol-high-capability-11.yaml
+    model: gpt-5.6-sol
+    provider: codex_auth
+    harness: Codex CLI
+    agent_type: codex
+    agent_config: configs/agents/codex-0.146.0.yaml
+    agent_config_sha256: c7c70d079f37ccc74e7bbb1010a8afd937a6a8a70c96f43d1acd045481df7a94
+    model_config: configs/models/gpt-5.6-sol.yaml
+    model_config_sha256: 4aa9a04a582e7cd36d3890ce0aa7f59c6d3931c4cda90f8a38060e343f56fd6e
+    cli_version: 0.146.0
+    reasoning: high
+    release_evidence:
+      registry: https://registry.npmjs.org/@openai%2Fcodex/0.146.0
+      checked_at: "2026-07-29T11:24:57Z"
+      published_at: "2026-07-29T01:42:51Z"
+      prerelease: false
+      package_integrity: >-
+        sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==
+      platform_alias_targets:
+        linux_arm64: "@openai/codex@0.146.0-linux-arm64"
+        linux_x64: "@openai/codex@0.146.0-linux-x64"
+      platform_integrity:
+        linux_arm64: >-
+          sha512-qiYDxkkEFnXG7joadJW6Q+XcgyDXCpGdpa9nk/c+i0gEomur1j7bHvx12NfWWCF/y8Tqri6ay+FLuC2MjdehtA==
+        linux_x64: >-
+          sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==
+    semantics: >-
+      Measures GPT-5.6 Sol with the current Codex harness and a high
+      reasoning budget on the repaired v2.1 catalog. Capability-11 runs are
+      extension experiments, not paper-table reproductions.
+  gpt-5.6-sol-xhigh:
+    classification: extension experiment
+    config: configs/runs/gpt-5.6-sol-xhigh.yaml
+    diagnostic_config: configs/runs/gpt-5.6-sol-xhigh-diagnostic.yaml
+    capability_config: configs/runs/gpt-5.6-sol-xhigh-capability-11.yaml
+    model: gpt-5.6-sol
+    provider: codex_auth
+    harness: Codex CLI
+    agent_type: codex
+    agent_config: configs/agents/codex-0.146.0.yaml
+    agent_config_sha256: c7c70d079f37ccc74e7bbb1010a8afd937a6a8a70c96f43d1acd045481df7a94
+    model_config: configs/models/gpt-5.6-sol.yaml
+    model_config_sha256: 4aa9a04a582e7cd36d3890ce0aa7f59c6d3931c4cda90f8a38060e343f56fd6e
+    cli_version: 0.146.0
+    reasoning: xhigh
+    release_evidence:
+      registry: https://registry.npmjs.org/@openai%2Fcodex/0.146.0
+      checked_at: "2026-07-29T11:24:57Z"
+      published_at: "2026-07-29T01:42:51Z"
+      prerelease: false
+      package_integrity: >-
+        sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==
+      platform_alias_targets:
+        linux_arm64: "@openai/codex@0.146.0-linux-arm64"
+        linux_x64: "@openai/codex@0.146.0-linux-x64"
+      platform_integrity:
+        linux_arm64: >-
+          sha512-qiYDxkkEFnXG7joadJW6Q+XcgyDXCpGdpa9nk/c+i0gEomur1j7bHvx12NfWWCF/y8Tqri6ay+FLuC2MjdehtA==
+        linux_x64: >-
+          sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==
+    semantics: >-
+      Measures GPT-5.6 Sol with the current Codex harness and an xhigh
+      reasoning budget on the repaired v2.1 catalog. Capability-11 runs are
+      extension experiments, not paper-table reproductions.
+  gpt-5.6-terra-xhigh:
+    classification: extension experiment
+    config: configs/runs/gpt-5.6-terra-xhigh.yaml
+    diagnostic_config: configs/runs/gpt-5.6-terra-xhigh-diagnostic.yaml
+    capability_config: configs/runs/gpt-5.6-terra-xhigh-capability-11.yaml
+    model: gpt-5.6-terra
+    provider: codex_auth
+    harness: Codex CLI
+    agent_type: codex
+    agent_config: configs/agents/codex-0.146.0.yaml
+    agent_config_sha256: c7c70d079f37ccc74e7bbb1010a8afd937a6a8a70c96f43d1acd045481df7a94
+    model_config: configs/models/gpt-5.6-terra.yaml
+    model_config_sha256: 4c1f5f8c15cf9425279127f47fb8c1bd9fc0b0d2c4d89d0625fec6102026e0c0
+    cli_version: 0.146.0
+    reasoning: xhigh
+    release_evidence:
+      registry: https://registry.npmjs.org/@openai%2Fcodex/0.146.0
+      checked_at: "2026-07-29T11:24:57Z"
+      published_at: "2026-07-29T01:42:51Z"
+      prerelease: false
+      package_integrity: >-
+        sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==
+      platform_alias_targets:
+        linux_arm64: "@openai/codex@0.146.0-linux-arm64"
+        linux_x64: "@openai/codex@0.146.0-linux-x64"
+      platform_integrity:
+        linux_arm64: >-
+          sha512-qiYDxkkEFnXG7joadJW6Q+XcgyDXCpGdpa9nk/c+i0gEomur1j7bHvx12NfWWCF/y8Tqri6ay+FLuC2MjdehtA==
+        linux_x64: >-
+          sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==
+    semantics: >-
+      Measures GPT-5.6 Terra with the current Codex harness and an xhigh
+      reasoning budget on the repaired v2.1 catalog. Capability-11 runs are
+      extension experiments, not paper-table reproductions.
 
 diagnostic_subset:
   problems:
@@ -186,3 +412,22 @@ diagnostic_subset:
     Inspect trajectories, tool availability, authentication, Docker
     isolation, evaluator behavior, metric coverage, and telemetry before any
     196-checkpoint extension run.
+
+capability_subset:
+  id: capability-11
+  problems:
+    database_migration: 5
+    datagate: 7
+    dynamic_config_service_api: 4
+    eve_market_tools: 4
+    execution_server: 6
+    forge: 8
+    textdrop: 6
+    trajectory_api: 5
+    mocked_http: 8
+    sheeteval: 7
+    eve_industry: 6
+  checkpoint_count: 66
+  purpose: >-
+    Fixed repeated-run panel for measuring autonomous capability, regression
+    behavior, failure modes, time, and cost on B2B-SaaS-adjacent engineering.

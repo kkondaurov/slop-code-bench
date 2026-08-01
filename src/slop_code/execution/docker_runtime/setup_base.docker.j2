@@ -86,6 +86,8 @@ RUN set -eux; \
 # Install Node via nvm and make it the default
 ENV NVM_DIR=/usr/local/nvm
 ENV NODE_VERSION=22.21.1
+ENV TSX_VERSION=4.23.1
+ENV TYPESCRIPT_VERSION=7.0.2
 
 SHELL ["/bin/bash", "-lc"]
 # Install Node via nvm and make it the default
@@ -93,17 +95,28 @@ RUN mkdir -p "$NVM_DIR" \
     && curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
 
 RUN . "$NVM_DIR/nvm.sh" \
-    && nvm install "$NODE_VERSION" \
-    && nvm alias default "$NODE_VERSION" \
-    && nvm use $NODE_VERSION
+  && nvm install "$NODE_VERSION" \
+  && nvm alias default "$NODE_VERSION" \
+  && nvm use $NODE_VERSION
+
+COPY base_node_tools/package.json base_node_tools/package-lock.json \
+  /usr/local/lib/scbench-node-tools/
 
 RUN . "$NVM_DIR/nvm.sh" \
   && nvm use $NODE_VERSION \
+  && npm ci --omit=dev --no-audit --no-fund \
+    --prefix /usr/local/lib/scbench-node-tools \
   && NODE_PATH="$(nvm which node)" \
   && NODE_BIN_DIR="$(dirname "$NODE_PATH")" \
   && ln -s "$NODE_BIN_DIR/node" /usr/local/bin/node \
   && ln -s "$NODE_BIN_DIR/npm" /usr/local/bin/npm \
-  && ln -s "$NODE_BIN_DIR/npx" /usr/local/bin/npx
+  && ln -s "$NODE_BIN_DIR/npx" /usr/local/bin/npx \
+  && ln -s /usr/local/lib/scbench-node-tools/node_modules/.bin/tsx \
+    /usr/local/bin/tsx \
+  && ln -s /usr/local/lib/scbench-node-tools/node_modules/.bin/tsc \
+    /usr/local/bin/tsc \
+  && tsx --version | grep -Fx "tsx v$TSX_VERSION" \
+  && test "$(tsc --version)" = "Version $TYPESCRIPT_VERSION"
 
 
 # Install Rust

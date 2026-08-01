@@ -86,7 +86,11 @@ STATUS_MAP: dict[str, _TestStatus] = {
     "xfailed": "skipped",
     "xpassed": "passed",
 }
-COLLECTION_LINE_PATTERN = re.compile(r"collected (\d+) items?")
+COLLECTION_LINE_PATTERN = re.compile(
+    r"collected (?P<collected>\d+) items?"
+    r"(?: / (?P<deselected>\d+) deselected)?"
+    r"(?: / (?P<selected>\d+) selected)?"
+)
 
 
 def _as_dict(value: object) -> _JsonObject | None:
@@ -730,7 +734,10 @@ markers =
             logger.warning("Collection line not found in pytest stdout")
             return False, 0
 
-        num_collected = int(match.group(1))
+        selected = match.group("selected")
+        num_collected = (
+            int(selected) if selected is not None else int(match.group("collected"))
+        )
 
         if num_collected == 0:
             logger.warning("Pytest collected 0 tests")

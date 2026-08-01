@@ -143,6 +143,8 @@ def run_case(
             else [test.model_dump(mode="json") for test in results.tests]
         )
         typer.echo(json.dumps(payload, indent=2))
-        return
+    else:
+        typer.echo(results.stdout or "", nl=False)
 
-    typer.echo(results.stdout or "", nl=False)
+    if results.pytest_exit_code != 0 or results.infrastructure_failure:
+        raise typer.Exit(1)

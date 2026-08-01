@@ -32,6 +32,8 @@ HASH_ALGORITHM = "sha256-length-prefixed-mode-v2"
 CATALOG_HASH_DOMAIN = b"slop-code.catalog-tree.v2\0"
 MANIFEST_SCHEMA_VERSION = 1
 MANIFEST_ID = "scbench-v2"
+SUITE_REVISION = "v2.1"
+CAPABILITY_SUBSET_ID = "capability-11"
 PAPER_ARXIV_ID = "2603.24755"
 PAPER_VERSION = "v2"
 PAPER_URL = "https://arxiv.org/html/2603.24755v2"
@@ -672,6 +674,13 @@ def _profile_evidence(
         if not isinstance(path_value, str):
             raise ValueError(f"SCBench v2 manifest path {key!r} is invalid")
         declared_existing_paths.append(path_value)
+    capability_config = expected.get("capability_config")
+    if capability_config is not None:
+        if not isinstance(capability_config, str):
+            raise ValueError(
+                "SCBench v2 manifest path 'capability_config' is invalid"
+            )
+        declared_existing_paths.append(capability_config)
     providers_path = protocol.get("providers_config")
     if not isinstance(providers_path, str):
         raise ValueError("SCBench v2 providers path is invalid")
@@ -715,10 +724,28 @@ def _profile_evidence(
             "SCBench v2 manifest has no diagnostic problem mapping"
         )
     diagnostic_problems = list(diagnostic_mapping)
+    capability = manifest.get("capability_subset")
+    capability_mapping = (
+        capability.get("problems") if isinstance(capability, dict) else None
+    )
+    capability_id = (
+        capability.get("id") if isinstance(capability, dict) else None
+    )
+    capability_problems = (
+        list(capability_mapping)
+        if isinstance(capability_mapping, dict)
+        else []
+    )
     if context.problem_names == full_problems:
         variant = "full"
     elif context.problem_names == diagnostic_problems:
         variant = "diagnostic"
+    elif (
+        isinstance(capability_id, str)
+        and capability_problems
+        and context.problem_names == capability_problems
+    ):
+        variant = capability_id
     else:
         variant = None
 
@@ -739,6 +766,13 @@ def _profile_evidence(
         "manifest.id",
         MANIFEST_ID,
         manifest.get("id"),
+    )
+    _add_check(
+        checks,
+        errors,
+        "manifest.suite_revision",
+        SUITE_REVISION,
+        manifest.get("suite_revision"),
     )
     if not isinstance(paper, dict):
         errors.append("manifest paper identity must be a mapping")
@@ -855,7 +889,7 @@ def _profile_evidence(
         checks,
         errors,
         "problem_set",
-        variant or "full or diagnostic",
+        variant or "full, diagnostic, or capability subset",
         variant or context.problem_names,
     )
     _add_check(
@@ -910,6 +944,38 @@ def _profile_evidence(
         if isinstance(diagnostic, dict)
         else None,
     )
+    if isinstance(capability_mapping, dict):
+        _add_check(
+            checks,
+            errors,
+            "capability.id",
+            CAPABILITY_SUBSET_ID,
+            capability_id,
+        )
+        locked_capability = {
+            name: locked_problems.get(name) for name in capability_mapping
+        }
+        _add_check(
+            checks,
+            errors,
+            "capability.problems",
+            locked_capability,
+            capability_mapping,
+        )
+        capability_count = sum(
+            value
+            for value in capability_mapping.values()
+            if type(value) is int
+        )
+        _add_check(
+            checks,
+            errors,
+            "capability.checkpoint_count",
+            capability_count,
+            capability.get("checkpoint_count")
+            if isinstance(capability, dict)
+            else None,
+        )
 
     expected_agent_path = expected.get("agent_config")
     actual_agent_path = _path_text(root, context.agent_config_path)

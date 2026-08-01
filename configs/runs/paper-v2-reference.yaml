@@ -1,6 +1,6 @@
 profile: paper-v2-reference
 agent: codex-0.124.0
-environment: docker-python3.12-uv-scb-v2
+environment: docker-python3.12-uv-scb-v2.1
 prompt: just-solve
 
 model:

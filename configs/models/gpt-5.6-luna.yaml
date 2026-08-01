@@ -1,0 +1,7 @@
+internal_name: gpt-5.6-luna
+provider: openai
+pricing:
+  input: 1.00
+  output: 6.00
+  cache_read: 0.10
+  cache_write: 0

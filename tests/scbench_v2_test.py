@@ -139,6 +139,7 @@ def _fixture_repo(tmp_path: Path) -> tuple[Path, Path, NamedProfileContext]:
     manifest = {
         "schema_version": 1,
         "id": MANIFEST_ID,
+        "suite_revision": "v2.1",
         "paper": {
             "arxiv_id": PAPER_ARXIV_ID,
             "version": PAPER_VERSION,
@@ -333,6 +334,33 @@ def test_named_profile_preflight_persists_verified_evidence(
     assert saved["attempts"][0]["status"] == "verified"
 
 
+def test_named_profile_accepts_declared_capability_subset(
+    tmp_path: Path,
+) -> None:
+    root, catalog, context = _fixture_repo(tmp_path)
+    manifest_path = root / "configs/scbench-v2/manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["capability_subset"] = {
+        "id": "capability-11",
+        "problems": {"alpha": 1, "gamma": 1},
+        "checkpoint_count": 2,
+    }
+    _write_yaml(manifest_path, manifest)
+
+    evidence = run_named_profile_preflight(
+        repository_root=root,
+        run_dir=tmp_path / "run",
+        catalog_root=catalog,
+        context=replace(context, problem_names=["alpha", "gamma"]),
+        persist=False,
+        verify_evaluator=False,
+    )
+
+    assert evidence is not None
+    assert evidence["status"] == "verified"
+    assert evidence["profile"]["variant"] == "capability-11"
+
+
 def test_named_profile_preflight_preserves_prior_attempts(
     tmp_path: Path,
 ) -> None:
@@ -505,6 +533,26 @@ def test_named_profile_rejects_manifest_semantic_drift(
     _write_yaml(manifest_path, manifest)
 
     with pytest.raises(ScbenchV2PreflightError, match=message):
+        run_named_profile_preflight(
+            repository_root=root,
+            run_dir=tmp_path / "run",
+            catalog_root=catalog,
+            context=context,
+            evaluator_preflight=lambda: _evaluator(root),
+        )
+
+
+def test_named_profile_rejects_suite_revision_drift(tmp_path: Path) -> None:
+    root, catalog, context = _fixture_repo(tmp_path)
+    manifest_path = root / "configs/scbench-v2/manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["suite_revision"] = "v2"
+    _write_yaml(manifest_path, manifest)
+
+    with pytest.raises(
+        ScbenchV2PreflightError,
+        match="manifest.suite_revision",
+    ):
         run_named_profile_preflight(
             repository_root=root,
             run_dir=tmp_path / "run",

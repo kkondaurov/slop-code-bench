@@ -1,11 +1,10 @@
-profile: paper-v2-reference
-agent: codex-0.124.0
+agent: codex-0.146.0
 environment: docker-python3.12-uv-scb-v2.1
 prompt: just-solve
 
 model:
   provider: codex_auth
-  name: gpt-5.5
+  name: gpt-5.6-terra
 
 thinking: high
 pass_policy: any-case
@@ -13,8 +12,7 @@ one_shot:
   enabled: false
 
 problems:
-  - mvvault
-  - xjq
+  - sheeteval
 
-save_dir: outputs/diagnostics/paper-v2-reference
+save_dir: outputs/diagnostics/gpt-5.6-terra-high-sheeteval-v2.1
 save_template: "${model.name}/${agent.type}-${agent.version}_${prompt}_${thinking}_${now:%Y%m%dT%H%M%S}"

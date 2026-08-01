@@ -292,6 +292,11 @@ def test_build_base_image_rebuilds_when_mutable_parent_tag_changes(
     assert result is rebuilt_image
     dockerfile_context = build.call_args.args[2]
     with tarfile.open(fileobj=dockerfile_context, mode="r") as archive:
+        assert set(archive.getnames()) == {
+            "Dockerfile",
+            "base_node_tools/package.json",
+            "base_node_tools/package-lock.json",
+        }
         dockerfile = archive.extractfile("Dockerfile")
         assert dockerfile is not None
         rendered = dockerfile.read().decode()
@@ -699,6 +704,12 @@ def test_rendered_base_image_installs_expected_tools_and_native_minio(
     assert "linux-${minio_arch}/archive/minio.${minio_release}" in dockerfile
     assert "sha256sum -c -" in dockerfile
     assert "release/linux-amd64/minio" not in dockerfile
+    assert "COPY base_node_tools/package.json" in dockerfile
+    assert "npm ci --omit=dev --no-audit --no-fund" in dockerfile
+    assert 'ENV TSX_VERSION=4.23.1' in dockerfile
+    assert 'ENV TYPESCRIPT_VERSION=7.0.2' in dockerfile
+    assert "/usr/local/bin/tsx" in dockerfile
+    assert "/usr/local/bin/tsc" in dockerfile
 
 
 def test_build_image_from_str_reuses_matching_parent_and_recipe() -> None:

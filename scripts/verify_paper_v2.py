@@ -16,6 +16,7 @@ from typing import Any
 import yaml
 
 from slop_code.metrics.checkpoint.driver import SCB_CHECK_REQUIREMENT
+from slop_code.scbench_v2 import CAPABILITY_SUBSET_ID
 from slop_code.scbench_v2 import EVALUATOR_COMMAND
 from slop_code.scbench_v2 import EVALUATOR_LOCK
 from slop_code.scbench_v2 import EVALUATOR_PROJECT
@@ -27,15 +28,16 @@ from slop_code.scbench_v2 import PAPER_URL
 from slop_code.scbench_v2 import PAPER_VERSION
 from slop_code.scbench_v2 import SOURCE_IMAGE_REFERENCE
 from slop_code.scbench_v2 import SOURCE_IMAGE_ROLE
+from slop_code.scbench_v2 import SUITE_REVISION
 from slop_code.scbench_v2 import build_catalog_lock
 from slop_code.scbench_v2 import sha256_file
 from slop_code.scbench_v2 import verify_catalog_content
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOCK_PATH = ROOT / "configs" / "scbench-v2" / "content-lock.json"
-EXPECTED_RELEASE = "v1.0"
-EXPECTED_COMMIT = "4d38d300059667d57e43c31969bc455f5c338b52"
-EXPECTED_CATALOG_REPOSITORY = "https://github.com/gabeorlanski/scb-problems"
+EXPECTED_RELEASE = "v1.0.1"
+EXPECTED_COMMIT = "9b4864d6bdefd8cd0f2d66d3eb0d1972914aefd3"
+EXPECTED_CATALOG_REPOSITORY = "https://github.com/kkondaurov/scb-problems"
 REPRODUCIBILITY_REPOSITORY = (
     "https://github.com/kkondaurov/slop-code-bench"
 )
@@ -43,10 +45,10 @@ UPSTREAM_RUNNER_REPOSITORY = (
     "https://github.com/SprocketLab/slop-code-bench"
 )
 RUNNER_BASE_COMMIT = "13de1a7a6b8b3dc5cc532a0c322a0997afa5bec7"
-RELEASE_TAG = "scbench-v2-repro.4"
+RELEASE_TAG = "scbench-v2.1-repro.1"
 RELEASE_URL = f"{REPRODUCIBILITY_REPOSITORY}/releases/tag/{RELEASE_TAG}"
 PREBUILT_ARCHIVE_NAME = (
-    "slopcodebench-base-scb-v2-linux-arm64-image-d2b862aad2bf.tar.zst"
+    "slopcodebench-base-scb-v2.1-linux-arm64-image-f92550022dbc.tar.zst"
 )
 PREBUILT_ARCHIVE_URL = (
     f"{REPRODUCIBILITY_REPOSITORY}/releases/download/{RELEASE_TAG}/"
@@ -54,12 +56,18 @@ PREBUILT_ARCHIVE_URL = (
 )
 PREBUILT_CHECKSUM_URL = (
     f"{REPRODUCIBILITY_REPOSITORY}/releases/download/{RELEASE_TAG}/"
-    "release-assets.sha256"
+    "release-assets-v2.1.sha256"
 )
 PREBUILT_PUBLICATION_STATUS = "published"
 SETUP_BASE_TEMPLATE = (
     "src/slop_code/execution/docker_runtime/setup_base.docker.j2"
 )
+NODE_TOOLS_LOCK = (
+    "src/slop_code/execution/docker_runtime/base_node_tools/package-lock.json"
+)
+NODE_VERSION = "22.21.1"
+TSX_VERSION = "4.23.1"
+TYPESCRIPT_VERSION = "7.0.2"
 
 
 def _manifest_relative_path(value: str) -> PurePosixPath:
@@ -195,6 +203,8 @@ def verify_suite_manifest(
         errors.append("suite manifest schema version mismatch")
     if manifest.get("id") != MANIFEST_ID:
         errors.append("suite manifest identity mismatch")
+    if manifest.get("suite_revision") != SUITE_REVISION:
+        errors.append("suite manifest revision mismatch")
     paper = manifest.get("paper")
     if not isinstance(paper, dict):
         errors.append("suite manifest paper identity must be an object")
@@ -290,6 +300,36 @@ def verify_suite_manifest(
             diagnostic_count = sum(diagnostic_values)
         if diagnostic.get("checkpoint_count") != diagnostic_count:
             errors.append("suite manifest diagnostic checkpoint count mismatch")
+
+    capability = manifest.get("capability_subset")
+    capability_problems = (
+        capability.get("problems") if isinstance(capability, dict) else None
+    )
+    if not isinstance(capability, dict) or capability.get(
+        "id"
+    ) != CAPABILITY_SUBSET_ID:
+        errors.append("suite manifest capability identity mismatch")
+    if not isinstance(problems, dict) or not isinstance(
+        capability_problems, dict
+    ):
+        errors.append("suite manifest capability subset is invalid")
+    else:
+        expected_capability = {
+            name: problems.get(name) for name in capability_problems
+        }
+        if capability_problems != expected_capability:
+            errors.append("suite manifest capability problem counts mismatch")
+        capability_values = list(capability_problems.values())
+        if not all(
+            type(value) is int and value >= 0
+            for value in capability_values
+        ):
+            errors.append("suite manifest capability counts are invalid")
+            capability_count = None
+        else:
+            capability_count = sum(capability_values)
+        if capability.get("checkpoint_count") != capability_count:
+            errors.append("suite manifest capability checkpoint count mismatch")
 
     protocol = manifest.get("protocol")
     if not isinstance(protocol, dict):
@@ -484,6 +524,108 @@ def verify_suite_manifest(
                             f"suite manifest bundled MinIO {field} mismatch"
                         )
 
+        node_toolchain = (
+            bundled_tools.get("node_toolchain")
+            if isinstance(bundled_tools, dict)
+            else None
+        )
+        if not isinstance(node_toolchain, dict):
+            errors.append("suite manifest Node toolchain binding is invalid")
+        else:
+            lock_value = node_toolchain.get("lock")
+            try:
+                node_lock_path = _safe_manifest_path(root, lock_value)
+                node_lock = json.loads(
+                    node_lock_path.read_text(encoding="utf-8")
+                )
+            except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+                errors.append(f"cannot inspect suite Node tool lock: {exc}")
+                node_lock = None
+                node_lock_path = None
+            if lock_value != NODE_TOOLS_LOCK:
+                errors.append("suite manifest Node tool lock path mismatch")
+            if (
+                node_lock_path is not None
+                and node_toolchain.get("lock_sha256")
+                != sha256_file(node_lock_path)
+            ):
+                errors.append("suite manifest Node tool lock digest mismatch")
+
+            packages = (
+                node_lock.get("packages")
+                if isinstance(node_lock, dict)
+                else None
+            )
+            for name, version in (
+                ("tsx", TSX_VERSION),
+                ("typescript", TYPESCRIPT_VERSION),
+            ):
+                package = (
+                    packages.get(f"node_modules/{name}")
+                    if isinstance(packages, dict)
+                    else None
+                )
+                if not isinstance(package, dict) or package.get(
+                    "version"
+                ) != version:
+                    errors.append(f"suite Node lock {name} version mismatch")
+
+        expected_node_tools = {
+            "node": {"version": NODE_VERSION, "runtime": "linux/arm64"},
+            "tsx": {"version": TSX_VERSION, "runtime": "linux/arm64"},
+            "typescript": {
+                "version": TYPESCRIPT_VERSION,
+                "runtime": "linux/arm64",
+            },
+        }
+        for name, expected in expected_node_tools.items():
+            actual = (
+                bundled_tools.get(name)
+                if isinstance(bundled_tools, dict)
+                else None
+            )
+            if not isinstance(actual, dict):
+                errors.append(f"suite manifest bundled {name} is invalid")
+                continue
+            for field, value in expected.items():
+                if actual.get(field) != value:
+                    errors.append(
+                        f"suite manifest bundled {name} {field} mismatch"
+                    )
+            if name in {"tsx", "typescript"}:
+                locked_package = (
+                    packages.get(f"node_modules/{name}")
+                    if isinstance(packages, dict)
+                    else None
+                )
+                locked_integrity = (
+                    locked_package.get("integrity")
+                    if isinstance(locked_package, dict)
+                    else None
+                )
+                if actual.get("package_integrity") != locked_integrity:
+                    errors.append(
+                        f"suite manifest bundled {name} integrity mismatch"
+                    )
+
+        try:
+            setup_template = _safe_manifest_path(
+                root,
+                SETUP_BASE_TEMPLATE,
+            ).read_text(encoding="utf-8")
+        except (OSError, ValueError) as exc:
+            errors.append(f"cannot inspect base Node tool setup: {exc}")
+        else:
+            for name, version in (
+                ("NODE_VERSION", NODE_VERSION),
+                ("TSX_VERSION", TSX_VERSION),
+                ("TYPESCRIPT_VERSION", TYPESCRIPT_VERSION),
+            ):
+                if f"ENV {name}={version}" not in setup_template:
+                    errors.append(f"suite base {name} mismatch")
+            if "npm ci --omit=dev --no-audit --no-fund" not in setup_template:
+                errors.append("suite base Node tools are not lock-installed")
+
     quality = manifest.get("quality_evaluator")
     primary = quality.get("primary") if isinstance(quality, dict) else None
     if not isinstance(primary, dict):
@@ -568,6 +710,10 @@ def verify_suite_manifest(
             "config": list(lock.get("problems", {})),
             "diagnostic_config": list(diagnostic_problems or {}),
         }
+        if profile.get("capability_config") is not None:
+            expected_problem_sets["capability_config"] = list(
+                capability_problems or {}
+            )
         for config_field, expected_problems in expected_problem_sets.items():
             config_value = profile.get(config_field)
             if not isinstance(config_value, str):

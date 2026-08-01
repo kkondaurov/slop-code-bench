@@ -27,6 +27,11 @@ from slop_code.logging import get_logger
 logger = get_logger(__name__)
 
 BASE_IMAGE_TEMPLATE = Path(__file__).parent / "setup_base.docker.j2"
+BASE_NODE_TOOLS_DIR = Path(__file__).parent / "base_node_tools"
+BASE_NODE_TOOL_FILES = (
+    BASE_NODE_TOOLS_DIR / "package.json",
+    BASE_NODE_TOOLS_DIR / "package-lock.json",
+)
 AGENT_USER = "1000:1000"
 BASE_IMAGE_HASH_LABEL = "io.slop-code.base-image-hash"
 UPSTREAM_IMAGE_ID_LABEL = "io.slop-code.upstream-image-id"
@@ -230,6 +235,12 @@ def _make_docker_context(
     return _freeze_docker_context(docker_file, extra_arcs).open()
 
 
+def _base_node_tool_arcs() -> dict[str, Path]:
+    return {
+        f"base_node_tools/{path.name}": path for path in BASE_NODE_TOOL_FILES
+    }
+
+
 def _find_image(image_name: str, client: docker.DockerClient) -> Image | None:
     logger.info("Checking if image exists", image_name=image_name)
     try:
@@ -310,6 +321,11 @@ def _get_base_image_hash(
     digest = hashlib.sha256()
     digest.update(dockerfile.encode("utf-8"))
     digest.update(b"\0")
+    for path in BASE_NODE_TOOL_FILES:
+        digest.update(path.name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
     if upstream_image_id is not None:
         digest.update(upstream_image_id.encode("utf-8"))
     return digest.hexdigest()[:12]
@@ -622,7 +638,8 @@ def build_base_image(
         )
 
     context_tar = _make_docker_context(
-        make_base_image(environment_spec, upstream_image_id)
+        make_base_image(environment_spec, upstream_image_id),
+        _base_node_tool_arcs(),
     )
     return _build_image(image_name, client, context_tar)
 

@@ -487,6 +487,14 @@ class TestPytestRunner:
         assert success is True
         assert count == 1
 
+    def test_check_collection_line_uses_selected_count(self, pytest_runner):
+        """A filtered run counts selected tests, not deselected inventory."""
+        stdout = "collected 172 items / 170 deselected / 2 selected\n"
+        success, count = pytest_runner._check_collection_line(stdout)
+
+        assert success is True
+        assert count == 2
+
     def test_check_collection_line_zero_items(self, pytest_runner):
         """_check_collection_line returns False for 0 items."""
         stdout = "collected 0 items\n"

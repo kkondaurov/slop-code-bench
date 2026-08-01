@@ -1,58 +1,58 @@
 # SCBench v2 experiment profiles
 
-This branch freezes the 36-problem, 196-checkpoint catalog used by revision v2
-of [arXiv:2603.24755](https://arxiv.org/html/2603.24755v2). The separate
-problem repository calls that catalog release `v1.0`. Those labels refer to
-different artifacts: paper revision v2 and problem-catalog release v1.0.
-The pre-run adversarial review and its reproduced defects are recorded in
+This branch locks a repaired revision of the 36-problem, 196-checkpoint catalog
+used by revision v2 of
+[arXiv:2603.24755](https://arxiv.org/html/2603.24755v2). The fork repair release
+`v1.0.1` is based on upstream `main` commit `ef6a9dd`. The pre-run adversarial
+review and its reproduced defects are recorded in
 [the harness review record](SCBENCH_V2_REVIEW.md).
 
-The exact catalog source is `gabeorlanski/scb-problems` release `v1.0`, commit
-`4d38d300059667d57e43c31969bc455f5c338b52`. Install and verify it before a
-diagnostic or full experiment:
+The exact catalog source is `kkondaurov/scb-problems` release `v1.0.1`, commit
+`9b4864d6bdefd8cd0f2d66d3eb0d1972914aefd3`. Install and verify it before a
+diagnostic or experiment:
 
 ```bash
 UV_NO_CONFIG=1 uv sync --frozen
-UV_NO_CONFIG=1 uv run --frozen slop-code sync v1.0
+UV_NO_CONFIG=1 uv run --frozen slop-code sync v1.0.1
 UV_NO_CONFIG=1 uv run --frozen python scripts/verify_paper_v2.py
 ```
 
 The verifier checks the managed release metadata, all 36 declared problem
-names, all 196 checkpoint declarations, the 6,183-file set, and a deterministic
+names, all 196 checkpoint declarations, the 6,184-file set, and a deterministic
 content hash. It does not update or download the catalog. A byte mismatch is a
 failed preflight, not an invitation to regenerate the lock in place.
 
 The experiment profiles use the dedicated
-`docker-python3.12-uv-scb-v2` environment. Two different Docker identities are
+`docker-python3.12-uv-scb-v2.1` environment. Two different Docker identities are
 locked and should not be conflated:
 
 - The upstream Astral `uv` manifest digest is the immutable parent input to the
   base-image setup recipe. The mutable tag is recorded only as a human-readable
   source reference.
-- `sha256:d2b862aad2bf40fe80573d0facc462608ce2a2fe76b56927a36050dc02a44f14`
+- `sha256:f92550022dbc45c417e0c5bfcab706411b7407881ffd2d9b74d4e2049bbce985`
   is the fully built `linux/arm64` Docker image after that recipe ran. Named
   profiles use this prebuilt image directly and verify its image ID and
   architecture instead of rerunning setup.
 
-The frozen harness is published as
-[`scbench-v2-repro.4`](https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2-repro.4).
+The v2.1 harness is published as
+[`scbench-v2.1-repro.1`](https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2.1-repro.1).
 Its `linux/arm64` base image and
-[`release-assets.sha256`](https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2-repro.4/release-assets.sha256)
+[`release-assets-v2.1.sha256`](https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2.1-repro.1/release-assets-v2.1.sha256)
 are release assets. Download the image to the loader's default path, or pass an
 existing local copy explicitly:
 
 ```bash
 mkdir -p outputs/reproducibility-images
 curl -fL \
-  https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2-repro.4/slopcodebench-base-scb-v2-linux-arm64-image-d2b862aad2bf.tar.zst \
-  -o outputs/reproducibility-images/slopcodebench-base-scb-v2-linux-arm64-image-d2b862aad2bf.tar.zst
+  https://github.com/kkondaurov/slop-code-bench/releases/download/scbench-v2.1-repro.1/slopcodebench-base-scb-v2.1-linux-arm64-image-f92550022dbc.tar.zst \
+  -o outputs/reproducibility-images/slopcodebench-base-scb-v2.1-linux-arm64-image-f92550022dbc.tar.zst
 ```
 
 ```bash
-scripts/load_scbench_v2_base.sh
+scripts/load_scbench_v2_1_base.sh
 
 # Or:
-scripts/load_scbench_v2_base.sh /absolute/path/to/the-image.tar.zst
+scripts/load_scbench_v2_1_base.sh /absolute/path/to/the-image.tar.zst
 ```
 
 The loader checks the archive SHA256, runs `zstd --test`, imports it through
@@ -78,10 +78,12 @@ CLI to 0.146.0 and reasoning to xhigh. Version 0.146.0 was the latest stable
 2026-07-29T11:24:57Z. The registry publication timestamp and package and Linux
 platform integrity values are frozen in the manifest. This profile is an
 extension experiment and must not be labeled as a reproduction of the paper's
-GPT-5.5 row.
+GPT-5.5 row. GPT-5.6 Luna, Sol, and Terra profiles are likewise extension
+experiments on the repaired catalog.
 
 Each profile has a full config and an 11-checkpoint diagnostic over `mvvault`
-and `xjq`:
+and `xjq`. Selected extension profiles also have a `capability-11` config over
+11 problems and 66 checkpoints:
 
 ```bash
 UV_NO_CONFIG=1 uv run --frozen slop-code run \
@@ -145,11 +147,23 @@ following it into host state. A separately labeled
 sensitivity analysis, but it must not overwrite the primary quality artifacts
 or headline metrics.
 
-Only after that gate is clean should the full extension config be launched:
+Only after that gate is clean should an extension config be launched. The full
+Terra-high capability profile is:
 
 ```bash
 UV_NO_CONFIG=1 uv run --frozen slop-code run \
-  --config configs/runs/gpt-5.5-current-xhigh.yaml \
+  --config configs/runs/gpt-5.6-terra-high-capability-11.yaml \
+  --num-workers 2
+```
+
+The post-repair SheetEval validation is deliberately narrower than the named
+capability profile. It is a one-problem diagnostic and therefore omits the
+named-profile key rather than weakening the named profile's fail-closed problem
+set:
+
+```bash
+UV_NO_CONFIG=1 uv run --frozen slop-code run \
+  --config configs/runs/gpt-5.6-terra-high-sheeteval-validation.yaml \
   --num-workers 2
 ```
 
@@ -169,4 +183,4 @@ The immutable experiment facts and profile semantics live in
 `configs/scbench-v2/manifest.yaml`; the catalog bytes are locked by
 `configs/scbench-v2/content-lock.json`. Source and release assets are bound to
 the public
-[`scbench-v2-repro.4` release](https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2-repro.4).
+[`scbench-v2.1-repro.1` release](https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2.1-repro.1).

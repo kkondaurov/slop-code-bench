@@ -18,7 +18,7 @@ from slop_code.logging import get_logger
 
 logger = get_logger(__name__)
 
-_GITHUB_API_ROOT = "https://api.github.com/repos/gabeorlanski/scb-problems"
+_GITHUB_API_ROOT = "https://api.github.com/repos/kkondaurov/scb-problems"
 _LATEST_RELEASE_URL = f"{_GITHUB_API_ROOT}/releases/latest"
 _RELEASE_TAGS_URL = f"{_GITHUB_API_ROOT}/releases/tags"
 _COMMITS_URL = f"{_GITHUB_API_ROOT}/commits"
