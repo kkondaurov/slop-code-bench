@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "run_timestamp": "20260802T010259",
+  "timings": [
+    {
+      "problem": "database_migration",
+      "checkpoints": 5,
+      "started": "2026-08-02T01:03:10.610237",
+      "ended": "2026-08-02T01:58:57.621850",
+      "wall_duration_seconds": 3347.011613,
+      "checkpoint_duration_seconds": 3199.091101,
+      "evaluator_duration_seconds": 74.31047677993774,
+      "cost": 2.2629096,
+      "steps": 204
+    },
+    {
+      "problem": "datagate",
+      "checkpoints": 7,
+      "started": "2026-08-02T01:03:10.613590",
+      "ended": "2026-08-02T01:59:04.434801",
+      "wall_duration_seconds": 3353.821211,
+      "checkpoint_duration_seconds": 2451.810028,
+      "evaluator_duration_seconds": 768.7203233242035,
+      "cost": 1.5764133999999999,
+      "steps": 183
+    },
+    {
+      "problem": "dynamic_config_service_api",
+      "checkpoints": 4,
+      "started": "2026-08-02T01:58:58.611041",
+      "ended": "2026-08-02T03:01:21.359510",
+      "wall_duration_seconds": 3742.748469,
+      "checkpoint_duration_seconds": 3383.9065169999994,
+      "evaluator_duration_seconds": 301.8739240169525,
+      "cost": 2.6858880000000003,
+      "steps": 226
+    },
+    {
+      "problem": "eve_market_tools",
+      "checkpoints": 4,
+      "started": "2026-08-02T01:59:05.356785",
+      "ended": "2026-08-02T04:05:10.600489",
+      "wall_duration_seconds": 7565.243704,
+      "checkpoint_duration_seconds": 3947.0845839999997,
+      "evaluator_duration_seconds": 3510.9273862838745,
+      "cost": 2.6410280000000004,
+      "steps": 191
+    },
+    {
+      "problem": "execution_server",
+      "checkpoints": 6,
+      "started": "2026-08-02T03:01:22.347503",
+      "ended": "2026-08-02T03:44:53.889392",
+      "wall_duration_seconds": 2611.541889,
+      "checkpoint_duration_seconds": 2422.108276,
+      "evaluator_duration_seconds": 90.77151656150818,
+      "cost": 1.5549986,
+      "steps": 164
+    },
+    {
+      "problem": "forge",
+      "checkpoints": 8,
+      "started": "2026-08-02T03:44:54.953476",
+      "ended": "2026-08-02T04:57:46.641177",
+      "wall_duration_seconds": 4371.687701,
+      "checkpoint_duration_seconds": 3778.7638349999997,
+      "evaluator_duration_seconds": 455.1171967983246,
+      "cost": 2.2818776,
+      "steps": 247
+    },
+    {
+      "problem": "textdrop",
+      "checkpoints": 6,
+      "started": "2026-08-02T04:05:11.611742",
+      "ended": "2026-08-02T04:54:23.654431",
+      "wall_duration_seconds": 2952.042689,
+      "checkpoint_duration_seconds": 2610.605048,
+      "evaluator_duration_seconds": 238.07356524467468,
+      "cost": 1.8321505999999999,
+      "steps": 180
+    },
+    {
+      "problem": "trajectory_api",
+      "checkpoints": 5,
+      "started": "2026-08-02T04:54:24.631264",
+      "ended": "2026-08-02T05:57:11.139544",
+      "wall_duration_seconds": 3766.50828,
+      "checkpoint_duration_seconds": 3388.252237,
+      "evaluator_duration_seconds": 304.8562180995941,
+      "cost": 2.497682,
+      "steps": 181
+    },
+    {
+      "problem": "mocked_http",
+      "checkpoints": 8,
+      "started": "2026-08-02T04:57:47.554363",
+      "ended": "2026-08-02T06:55:29.099174",
+      "wall_duration_seconds": 7061.544811,
+      "checkpoint_duration_seconds": 5888.361028,
+      "evaluator_duration_seconds": 981.3367793560028,
+      "cost": 5.0762964,
+      "steps": 424
+    },
+    {
+      "problem": "sheeteval",
+      "checkpoints": 7,
+      "started": "2026-08-02T05:57:12.164104",
+      "ended": "2026-08-02T07:06:24.869713",
+      "wall_duration_seconds": 4152.705609,
+      "checkpoint_duration_seconds": 3782.273219,
+      "evaluator_duration_seconds": 236.80224013328552,
+      "cost": 2.6855390000000003,
+      "steps": 241
+    },
+    {
+      "problem": "eve_industry",
+      "checkpoints": 6,
+      "started": "2026-08-02T06:55:30.121667",
+      "ended": "2026-08-02T07:59:22.548165",
+      "wall_duration_seconds": 3832.426498,
+      "checkpoint_duration_seconds": 3462.503401,
+      "evaluator_duration_seconds": 264.1692271232605,
+      "cost": 2.3790752000000004,
+      "steps": 227
+    }
+  ]
+}
