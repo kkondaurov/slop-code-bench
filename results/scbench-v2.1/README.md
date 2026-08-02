@@ -13,3 +13,4 @@ Pre-v2.1 observations are not comparable and are excluded.
 | Run | Model | Reasoning | Sample | Strict | Current | Core | Tests | API-equivalent cost | Wall time |
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | [2026-08-02 capability-11 sample 1](gpt-5.6-luna-xhigh-capability-11/20260802T010259/) | GPT-5.6 Luna | xhigh | 1 | 10/66 | 24/66 | 45/66 | 7,201/8,113 | $27.47 | 6:56:12 |
+| [2026-08-02 capability-11 sample 1](gpt-5.6-terra-high-capability-11/20260802T081238/) | GPT-5.6 Terra | high | 1 | 9/66 | 23/66 | 43/66 | 7,110/8,113 | $32.26 | 3:35:29 |
