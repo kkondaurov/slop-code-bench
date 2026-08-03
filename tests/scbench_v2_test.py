@@ -18,6 +18,7 @@ from slop_code.scbench_v2 import SOURCE_IMAGE_REFERENCE
 from slop_code.scbench_v2 import SOURCE_IMAGE_ROLE
 from slop_code.scbench_v2 import STAGED_CATALOG_PATH
 from slop_code.scbench_v2 import STAGED_EVALUATOR_PATH
+from slop_code.scbench_v2 import SUITE_REVISION
 from slop_code.scbench_v2 import NamedProfileContext
 from slop_code.scbench_v2 import ScbenchV2CatalogIntegrityError
 from slop_code.scbench_v2 import ScbenchV2PreflightError
@@ -139,7 +140,7 @@ def _fixture_repo(tmp_path: Path) -> tuple[Path, Path, NamedProfileContext]:
     manifest = {
         "schema_version": 1,
         "id": MANIFEST_ID,
-        "suite_revision": "v2.1",
+        "suite_revision": SUITE_REVISION,
         "paper": {
             "arxiv_id": PAPER_ARXIV_ID,
             "version": PAPER_VERSION,

@@ -1,6 +1,6 @@
 profile: paper-v2-reference
 agent: codex-0.124.0
-environment: docker-python3.12-uv-scb-v2.1
+environment: docker-python3.12-uv-scb-v2.2
 prompt: just-solve
 
 model:
@@ -50,5 +50,5 @@ problems:
   - trajectory_api
   - xjq
 
-save_dir: outputs/experiments/paper-v2-reference
+save_dir: outputs/experiments/paper-v2-reference-v2.2
 save_template: "${model.name}/${agent.type}-${agent.version}_${prompt}_${thinking}_${now:%Y%m%dT%H%M%S}"

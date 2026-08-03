@@ -1,0 +1,38 @@
+type: docker
+name: python3.12-scb-v2.2
+docker:
+  # Immutable multi-platform digest resolved from
+  # ghcr.io/astral-sh/uv:python3.12-trixie-slim for the SCBench v2.2 profile.
+  image: ghcr.io/astral-sh/uv@sha256:519357e414a4240af8b3ac657466c20f9d6041b5a3ce999d96fa9d576ef7fd29
+  # Fully built linux/arm64 base captured after applying this environment's
+  # unchanged setup recipe used by v2.1. The catalog changes do not require a
+  # new runtime image; load the already published verified archive first.
+  prebuilt_image: sha256:f92550022dbc45c417e0c5bfcab706411b7407881ffd2d9b74d4e2049bbce985
+  expected_image_id: sha256:f92550022dbc45c417e0c5bfcab706411b7407881ffd2d9b74d4e2049bbce985
+  expected_architecture: arm64
+  workdir: /workspace
+  mount_workspace: true
+environment:
+  env:
+    UV_NO_CONFIG: "1"
+    UV_CACHE_DIR: /tmp/uv-cache
+    PIP_CACHE_DIR: /tmp/pip-cache-dir
+    PIP_CONFIG_FILE: /tmp/pip-conf
+setup:
+  eval_commands:
+    - uv init
+    - uv add -r requirements.txt
+  resume_commands:
+    - python -m venv .venv
+    - >-
+      if [ -f uv.lock ] && [ -f pyproject.toml ]; then
+      UV_NO_CONFIG=1 uv sync --frozen;
+      elif [ -f requirements.txt ]; then
+      .venv/bin/pip install --requirement requirements.txt;
+      elif [ -f pyproject.toml ]; then
+      .venv/bin/pip install --editable .;
+      fi
+commands:
+  entry_file: "{entry_file}.py"
+  command: uv run
+  agent_command: python

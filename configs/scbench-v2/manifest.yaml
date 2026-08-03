@@ -1,6 +1,6 @@
 schema_version: 1
 id: scbench-v2
-suite_revision: v2.1
+suite_revision: v2.2
 
 paper:
   arxiv_id: "2603.24755"
@@ -11,34 +11,33 @@ runner:
   repository: https://github.com/kkondaurov/slop-code-bench
   upstream_repository: https://github.com/SprocketLab/slop-code-bench
   base_commit: 13de1a7a6b8b3dc5cc532a0c322a0997afa5bec7
-  release_tag: scbench-v2.1-repro.1
-  release_url: https://github.com/kkondaurov/slop-code-bench/releases/tag/scbench-v2.1-repro.1
+  release_tag: scbench-v2.2
+  release_url: https://github.com/kkondaurov/slop-code-bench/tree/scbench-v2.2
   selection: >-
     Current upstream base selected for the reproducible fork. It includes
-    post-paper correctness fixes. This fork adds the v2.1 catalog-integrity
-    checks and is not claimed to be the unpublished byte-exact runner used to
-    produce the paper table.
+    post-paper correctness fixes. This fork adds catalog-integrity checks and
+    binds the documented v2.2 capability-panel repairs. It is not claimed to
+    be the unpublished byte-exact runner used to produce the paper table.
 
 catalog:
   repository: https://github.com/kkondaurov/scb-problems
   upstream_repository: https://github.com/gabeorlanski/scb-problems
-  release: v1.0.1
-  commit: 9b4864d6bdefd8cd0f2d66d3eb0d1972914aefd3
+  release: v1.0.2
+  commit: 88e9666f9529c97a30951fca17cb38656ea0a5f1
   problem_count: 36
   checkpoint_count: 196
   content_lock: configs/scbench-v2/content-lock.json
   content_lock_schema_version: 2
-  content_lock_sha256: c231f6d2a0bb767ed06e02209db35ccb119db598ef10c2f166c0b287c2a8c6d5
+  content_lock_sha256: 3a10c31e6e754936624e4ab7a214d74eb1ba97829934748cc6e806342a3f881a
   hash_algorithm: sha256-length-prefixed-mode-v2
   note: >-
-    Fork release v1.0.1 is based on upstream main commit ef6a9dd and repairs
-    confirmed capability-11 defects without changing checkpoint intent or
-    expected outcomes. Earlier runs on superseded catalog bytes are not
-    comparable and are not retained as v2.1 benchmark results.
+    Fork release v1.0.2 is two reviewed commits above v1.0.1. It retains only
+    the narrow repairs documented in SCBENCH_V2_2_REPAIR_NOTES.md. Earlier
+    runs on superseded catalog bytes are not v2.2 benchmark results.
 
 protocol:
-  environment: docker-python3.12-uv-scb-v2.1
-  environment_sha256: 0bac802380fbab926394317312750a5bfc4ff6f000b262e127c72412d697c18c
+  environment: docker-python3.12-uv-scb-v2.2
+  environment_sha256: ce798e561db498a04c79e3c3a641d07a9d783b4743da1bec207b2e6fadf229ce
   source_image:
     reference: ghcr.io/astral-sh/uv:python3.12-trixie-slim
     pinned: ghcr.io/astral-sh/uv@sha256:519357e414a4240af8b3ac657466c20f9d6041b5a3ce999d96fa9d576ef7fd29
@@ -84,9 +83,9 @@ protocol:
       loader: scripts/load_scbench_v2_1_base.sh
     publication_status: published
     note: >-
-      This is the fully built Docker image after applying the environment
-      setup recipe, not the upstream parent manifest digest. The verified
-      archive is published with the scbench-v2.1-repro.1 GitHub release.
+      The v2.2 catalog repairs do not change runtime dependencies. This profile
+      therefore reuses the byte-identical, verified v2.1 base-image archive
+      published with the scbench-v2.1-repro.1 GitHub release.
   prompt: just-solve
   prompt_sha256: 663d8920c1f88f30f9fc51ff47328a083a61fd13e6db082a9707613a6aa725e3
   seed: 42
@@ -160,7 +159,7 @@ profiles:
           sha512-cJ4QfQIrz2gkXVWephiGo9JDyD3qLKhvkTTLk7gI8rKd7MZpVXn9/1e7pZCQnJVA7Dk6ocA5G+sxnR78SoIejw==
     semantics: >-
       Matches the paper's published GPT-5.5 model, CLI version, prompt, and
-      reasoning setting. The selected runner and repaired v2.1 catalog contain
+      reasoning setting. The selected runner and repaired v2.2 catalog contain
       documented post-paper fixes, so results are not a reproduction of the
       paper table or its unpublished runner environment.
   gpt-5.5-current-xhigh:
@@ -195,7 +194,7 @@ profiles:
           sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==
     semantics: >-
       Measures a newer Codex harness and a larger reasoning budget on the
-      repaired v2.1 catalog. It must not be presented as a reproduction of the
+      repaired v2.2 catalog. It must not be presented as a reproduction of the
       paper's GPT-5.5 row.
   gpt-5.6-luna-xhigh:
     classification: extension experiment
@@ -229,7 +228,7 @@ profiles:
           sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==
     semantics: >-
       Measures GPT-5.6 Luna with the current Codex harness and an xhigh
-      reasoning budget on the repaired v2.1 catalog. Capability-11 runs are
+      reasoning budget on the repaired v2.2 catalog. Capability-11 runs are
       extension experiments, not paper-table reproductions.
   gpt-5.6-sol-medium:
     classification: extension experiment
@@ -263,7 +262,7 @@ profiles:
           sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==
     semantics: >-
       Measures GPT-5.6 Sol with the current Codex harness and a medium
-      reasoning budget on the repaired v2.1 catalog. Capability-11 runs are
+      reasoning budget on the repaired v2.2 catalog. Capability-11 runs are
       extension experiments, not paper-table reproductions.
   gpt-5.6-terra-high:
     classification: extension experiment
@@ -297,7 +296,7 @@ profiles:
           sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==
     semantics: >-
       Measures GPT-5.6 Terra with the current Codex harness and a high
-      reasoning budget on the repaired v2.1 catalog. Capability-11 runs are
+      reasoning budget on the repaired v2.2 catalog. Capability-11 runs are
       extension experiments, not paper-table reproductions.
 
   gpt-5.6-sol-high:
@@ -332,7 +331,7 @@ profiles:
           sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==
     semantics: >-
       Measures GPT-5.6 Sol with the current Codex harness and a high
-      reasoning budget on the repaired v2.1 catalog. Capability-11 runs are
+      reasoning budget on the repaired v2.2 catalog. Capability-11 runs are
       extension experiments, not paper-table reproductions.
   gpt-5.6-sol-xhigh:
     classification: extension experiment
@@ -366,7 +365,7 @@ profiles:
           sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==
     semantics: >-
       Measures GPT-5.6 Sol with the current Codex harness and an xhigh
-      reasoning budget on the repaired v2.1 catalog. Capability-11 runs are
+      reasoning budget on the repaired v2.2 catalog. Capability-11 runs are
       extension experiments, not paper-table reproductions.
   gpt-5.6-terra-xhigh:
     classification: extension experiment
@@ -400,7 +399,7 @@ profiles:
           sha512-fswvyGprAPCMiOEue/7MKMk7pCjh9kZIJfJX5i9atmfnmGYbYCcUhZsEH9LEP0+0t5xyPqDbfNXY7NSxIVuXxA==
     semantics: >-
       Measures GPT-5.6 Terra with the current Codex harness and an xhigh
-      reasoning budget on the repaired v2.1 catalog. Capability-11 runs are
+      reasoning budget on the repaired v2.2 catalog. Capability-11 runs are
       extension experiments, not paper-table reproductions.
 
 diagnostic_subset:

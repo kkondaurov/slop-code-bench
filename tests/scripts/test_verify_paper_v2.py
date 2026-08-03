@@ -53,14 +53,14 @@ def test_checked_in_lock_and_manifest_agree() -> None:
     assert sum(lock["problems"].values()) == 196
     assert lock["schema_version"] == 2
     assert lock["hash_algorithm"] == MODULE.HASH_ALGORITHM
-    assert manifest["suite_revision"] == "v2.1"
+    assert manifest["suite_revision"] == "v2.2"
     assert manifest["catalog"]["release"] == lock["source"]["release"]
     assert manifest["catalog"]["commit"] == lock["source"]["commit"]
     environment_path = (
         ROOT
         / "configs"
         / "environments"
-        / "docker-python3.12-uv-scb-v2.1.yaml"
+        / "docker-python3.12-uv-scb-v2.2.yaml"
     )
     assert (
         manifest["protocol"]["environment_sha256"]
@@ -355,7 +355,7 @@ def test_missing_managed_manifest_gives_frozen_sync_command(
     assert errors == [
         "managed catalog manifest is missing: "
         f"{tmp_path / 'manifest.json'}; "
-            "run `UV_NO_CONFIG=1 uv run --frozen slop-code sync v1.0.1`"
+            "run `UV_NO_CONFIG=1 uv run --frozen slop-code sync v1.0.2`"
     ]
 
 

@@ -35,8 +35,8 @@ from slop_code.scbench_v2 import verify_catalog_content
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOCK_PATH = ROOT / "configs" / "scbench-v2" / "content-lock.json"
-EXPECTED_RELEASE = "v1.0.1"
-EXPECTED_COMMIT = "9b4864d6bdefd8cd0f2d66d3eb0d1972914aefd3"
+EXPECTED_RELEASE = "v1.0.2"
+EXPECTED_COMMIT = "88e9666f9529c97a30951fca17cb38656ea0a5f1"
 EXPECTED_CATALOG_REPOSITORY = "https://github.com/kkondaurov/scb-problems"
 REPRODUCIBILITY_REPOSITORY = (
     "https://github.com/kkondaurov/slop-code-bench"
@@ -45,17 +45,20 @@ UPSTREAM_RUNNER_REPOSITORY = (
     "https://github.com/SprocketLab/slop-code-bench"
 )
 RUNNER_BASE_COMMIT = "13de1a7a6b8b3dc5cc532a0c322a0997afa5bec7"
-RELEASE_TAG = "scbench-v2.1-repro.1"
-RELEASE_URL = f"{REPRODUCIBILITY_REPOSITORY}/releases/tag/{RELEASE_TAG}"
+RELEASE_TAG = "scbench-v2.2"
+RELEASE_URL = f"{REPRODUCIBILITY_REPOSITORY}/tree/{RELEASE_TAG}"
+PREBUILT_ARCHIVE_RELEASE_TAG = "scbench-v2.1-repro.1"
 PREBUILT_ARCHIVE_NAME = (
     "slopcodebench-base-scb-v2.1-linux-arm64-image-f92550022dbc.tar.zst"
 )
 PREBUILT_ARCHIVE_URL = (
-    f"{REPRODUCIBILITY_REPOSITORY}/releases/download/{RELEASE_TAG}/"
+    f"{REPRODUCIBILITY_REPOSITORY}/releases/download/"
+    f"{PREBUILT_ARCHIVE_RELEASE_TAG}/"
     f"{PREBUILT_ARCHIVE_NAME}"
 )
 PREBUILT_CHECKSUM_URL = (
-    f"{REPRODUCIBILITY_REPOSITORY}/releases/download/{RELEASE_TAG}/"
+    f"{REPRODUCIBILITY_REPOSITORY}/releases/download/"
+    f"{PREBUILT_ARCHIVE_RELEASE_TAG}/"
     "release-assets-v2.1.sha256"
 )
 PREBUILT_PUBLICATION_STATUS = "published"
