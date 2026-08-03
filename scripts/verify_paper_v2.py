@@ -45,7 +45,7 @@ UPSTREAM_RUNNER_REPOSITORY = (
     "https://github.com/SprocketLab/slop-code-bench"
 )
 RUNNER_BASE_COMMIT = "13de1a7a6b8b3dc5cc532a0c322a0997afa5bec7"
-RELEASE_TAG = "scbench-v2.2"
+RELEASE_TAG = "scbench-v2.2-workers4"
 RELEASE_URL = f"{REPRODUCIBILITY_REPOSITORY}/tree/{RELEASE_TAG}"
 PREBUILT_ARCHIVE_RELEASE_TAG = "scbench-v2.1-repro.1"
 PREBUILT_ARCHIVE_NAME = (

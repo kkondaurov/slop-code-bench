@@ -8,7 +8,7 @@ only and must not be published or compared as v2.2 samples.
 
 ## Release identity
 
-- Runner: `kkondaurov/slop-code-bench`, tag `scbench-v2.2`.
+- Runner: `kkondaurov/slop-code-bench`, tag `scbench-v2.2-workers4`.
 - Catalog: `kkondaurov/scb-problems`, tag `v1.0.2`, commit
   `88e9666f9529c97a30951fca17cb38656ea0a5f1`.
 - Catalog content: 36 problems, 196 checkpoints, 6,184 locked files, tree
@@ -84,8 +84,10 @@ The cumulative Database Migration test also failed the unreleased checkpoint
 
 The catalog-only repair adds no runtime dependency. The v2.2 environment
 configuration therefore reuses the exact published v2.1 base image and archive.
-The benchmark protocol remains serialized at two workers. Worker-count changes
-are operational choices and are not part of the catalog repair.
+The breadth-first queue permits up to four concurrent problem workers. Worker
+count is an operational protocol choice, not part of the catalog repair; agent
+and evaluator time remain separate from end-to-end wall time in result
+reporting.
 
 No pre-v2.2, abandoned, duplicate, or incomplete output counts toward the new
 breadth-first queue.

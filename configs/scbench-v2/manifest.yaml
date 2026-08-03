@@ -11,8 +11,8 @@ runner:
   repository: https://github.com/kkondaurov/slop-code-bench
   upstream_repository: https://github.com/SprocketLab/slop-code-bench
   base_commit: 13de1a7a6b8b3dc5cc532a0c322a0997afa5bec7
-  release_tag: scbench-v2.2
-  release_url: https://github.com/kkondaurov/slop-code-bench/tree/scbench-v2.2
+  release_tag: scbench-v2.2-workers4
+  release_url: https://github.com/kkondaurov/slop-code-bench/tree/scbench-v2.2-workers4
   selection: >-
     Current upstream base selected for the reproducible fork. It includes
     post-paper correctness fixes. This fork adds catalog-integrity checks and
@@ -90,7 +90,7 @@ protocol:
   prompt_sha256: 663d8920c1f88f30f9fc51ff47328a083a61fd13e6db082a9707613a6aa725e3
   seed: 42
   evaluate: true
-  num_workers: 2
+  num_workers: 4
   concurrent_evaluation: false
   providers_config: configs/providers.yaml
   providers_config_sha256: 400e5fce45d818eb6ba63f02facad35560c81d34c51a2f8ab0c3005b6887c65b
