@@ -14,3 +14,4 @@ Pre-v2.2 observations are not comparable and are excluded.
 | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | [2026-08-03 capability-11 sample 1](gpt-5.6-luna-xhigh-capability-11/20260803T141547/) | GPT-5.6 Luna | xhigh | 1 | 7/66 | 22/66 | 47/66 | 7,483/8,113 | $28.29 | 12:29:03.623 | 3:55:59.359 |
 | [2026-08-03 capability-11 sample 1](gpt-5.6-terra-high-capability-11/20260803T182555/) | GPT-5.6 Terra | high | 1 | 10/66 | 24/66 | 49/66 | 7,516/8,113 | $31.59 | 5:10:00.298 | 2:01:33.945 |
+| [2026-08-03 capability-11 sample 1](gpt-5.6-terra-xhigh-capability-11/20260803T205147/) | GPT-5.6 Terra | xhigh | 1 | 9/66 | 27/66 | 49/66 | 7,562/8,113 | $50.33 | 8:00:55.432 | 2:45:11.583 |
