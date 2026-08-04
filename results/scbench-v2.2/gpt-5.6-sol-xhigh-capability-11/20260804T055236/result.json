@@ -1,0 +1,196 @@
+{
+  "model": "gpt-5.6-sol",
+  "thinking": "xhigh",
+  "prompt": "just-solve",
+  "agent_type": "codex",
+  "agent_version": "0.146.0",
+  "num_problems": 11,
+  "expected_problems": 11,
+  "num_checkpoints": 66,
+  "expected_checkpoints": 66,
+  "costs": {
+    "checkpoint": {
+      "mean": 1.764488606060606,
+      "stddev": 1.025229585356176,
+      "min": 0.460822,
+      "max": 5.215853,
+      "median": 1.525948,
+      "count": 66
+    },
+    "problem": {
+      "mean": 10.586931636363637,
+      "stddev": 5.07422672177626,
+      "min": 6.820674,
+      "max": 24.716757,
+      "median": 8.101844999999999,
+      "count": 11
+    },
+    "total": 116.456248
+  },
+  "time": {
+    "checkpoint": {
+      "mean": 636.8849617575758,
+      "stddev": 308.05552087507016,
+      "min": 194.266832,
+      "max": 1652.966861,
+      "median": 638.1449845,
+      "count": 66
+    },
+    "problem": {
+      "mean": 3821.3097705454547,
+      "stddev": 1299.0042984793738,
+      "min": 2601.103097,
+      "max": 7167.374239,
+      "median": 3427.950557,
+      "count": 11
+    }
+  },
+  "tokens": {
+    "input": 92978882,
+    "output": 1497689,
+    "cache_read": 87415296,
+    "cache_write": 0,
+    "reasoning": 742840,
+    "problem": {
+      "input": 8452625.636363637,
+      "output": 136153.54545454544,
+      "cache_read": 7946845.090909091,
+      "cache_write": 0.0,
+      "reasoning": 67530.90909090909
+    },
+    "checkpoint": {
+      "input": 1408770.9393939395,
+      "output": 22692.257575757576,
+      "cache_read": 1324474.1818181819,
+      "cache_write": 0.0,
+      "reasoning": 11255.151515151516
+    }
+  },
+  "steps": {
+    "checkpoint": {
+      "mean": 31.227272727272727,
+      "stddev": 11.992042816346634,
+      "min": 11.0,
+      "max": 66.0,
+      "median": 28.5,
+      "count": 66
+    },
+    "problem": {
+      "mean": 187.36363636363637,
+      "stddev": 57.898657544493595,
+      "min": 131.0,
+      "max": 340.0,
+      "median": 178.0,
+      "count": 11
+    }
+  },
+  "checkpoints_solved": 18,
+  "checkpoints_iso_solved": 31,
+  "checkpoints_core_solved": 52,
+  "problem_solved": 0.0,
+  "problem_partial": 8.0,
+  "pct_checkpoints_solved": 27.27272727272727,
+  "pct_checkpoints_iso_solved": 46.96969696969697,
+  "pct_problems_solved": 0.0,
+  "pct_problems_partial": 72.72727272727273,
+  "pct_checkpoints_core_solved": 78.78787878787878,
+  "pass_rates": {
+    "problem": {
+      "core": 0.9065972222222222,
+      "total": 0.9067127005957318,
+      "error": 0.8592102846648301,
+      "functionality": 0.8718742352919108,
+      "regression": 0.9262779861573971
+    },
+    "checkpoint": {
+      "core": 0.9243386243386243,
+      "total": 0.9243144049751625,
+      "error": 0.9519802545226274,
+      "functionality": 0.8908626193864742,
+      "regression": 0.937667288540473
+    }
+  },
+  "cc": {
+    "high_count": {
+      "mean": 9.621212121212121,
+      "stddev": 7.263745911167644,
+      "min": 1.0,
+      "max": 35.0,
+      "median": 7.5,
+      "count": 66
+    },
+    "high_mean": {
+      "mean": 17.555766661984645,
+      "stddev": 3.6621650697715618,
+      "min": 11.0,
+      "max": 30.0,
+      "median": 17.109625668449198,
+      "count": 66
+    },
+    "max": {
+      "mean": 39.25757575757576,
+      "stddev": 30.26259971854602,
+      "min": 11.0,
+      "max": 176.0,
+      "median": 28.0,
+      "count": 66
+    }
+  },
+  "ratios": {
+    "rubric": {
+      "mean": null,
+      "stddev": null,
+      "min": null,
+      "max": null,
+      "median": null,
+      "count": 0
+    },
+    "lint": {
+      "mean": 0.10736076591994667,
+      "stddev": 0.04432295708965656,
+      "min": 0.04656402553511078,
+      "max": 0.21101341971309578,
+      "median": 0.10107379669217248,
+      "count": 66
+    },
+    "violation_pct": {
+      "mean": 0.864922129613725,
+      "stddev": 0.08728969890706562,
+      "min": 0.707641196013289,
+      "max": 1.0008510638297872,
+      "median": 0.8466873824593559,
+      "count": 66
+    }
+  },
+  "verbosity": {
+    "mean": 0.3616315763592204,
+    "stddev": 0.11537744755469029,
+    "min": 0.2172972972972973,
+    "max": 0.680161943319838,
+    "median": 0.32511215222862144,
+    "count": 66
+  },
+  "erosion": {
+    "mean": 0.581333522276997,
+    "stddev": 0.13365471845582932,
+    "min": 0.16461277321895026,
+    "max": 0.8604136583755387,
+    "median": 0.5683911919847957,
+    "count": 66
+  },
+  "scb_check": {
+    "evaluator": "scb-check",
+    "requested_version": "0.1.3",
+    "resolved_versions": [
+      "0.1.3"
+    ],
+    "measured_checkpoints": 66,
+    "expected_checkpoints": 66,
+    "failed_checkpoints": 0,
+    "missing_snapshot_checkpoints": 0,
+    "missing_metadata_checkpoints": 0,
+    "missing_checkpoint_records": 0,
+    "unmeasured_checkpoints": 0,
+    "coverage_pct": 100.0
+  }
+}
